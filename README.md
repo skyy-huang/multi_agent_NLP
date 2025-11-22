@@ -211,6 +211,65 @@ python multi_agent_nlp_project.py distill --distill-src data/synth_en.jsonl --di
 python multi_agent_nlp_project.py demo --rounds 2 --no-tools --no-memory
 ```
 
+### 5. 长文本文件优化 (新功能)
+当你的学术初稿非常长（数千到数万字符），可以放到一个 `.txt` 文件中，使用 `--text-file` 自动分段迭代优化。
+
+新增参数说明：
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| --text-file <path> | - | 指定要优化的长文本文件路径（UTF-8 编码） |
+| --chunk-size <int> | 5000 | 单段最大字符数（简单按句子重组）|
+| --chunk-overlap <int> | 200 | 相邻段落的尾部重叠字符数，提高连续性（首段无重叠）|
+| --max-chunks <int> | 0 | 限制最多处理的段数（0 表示不限制，仅用于快速试验）|
+
+使用示例：
+```bat
+python multi_agent_nlp_project.py demo --text-file paper_draft.txt --rounds 2 --requirements "学术表达提升,结构清晰" --report long.json --html-report long.html
+```
+限制处理前 3 段并调整分段大小：
+```bat
+python multi_agent_nlp_project.py demo --text-file paper_draft.txt --rounds 1 --chunk-size 3000 --chunk-overlap 150 --max-chunks 3 --requirements "学术表达提升;逻辑结构优化"
+```
+交互模式下同样适用（设置 ENABLE_INTERACTIVE=1）：
+```bat
+python multi_agent_nlp_project.py --text-file paper_draft.txt --rounds 2 --requirements "学术表达提升,逻辑结构优化"
+```
+输出 JSON 报告结构（`aggregated` 示例）：
+```text
+{
+  "file": "paper_draft.txt",
+  "chunks": 4,
+  "chunk_size": 5000,
+  "overlap": 200,
+  "requirements": ["学术表达提升","结构清晰"],
+  "final_text": "<所有优化后分段拼接>",
+  "segments": [
+    {
+      "segment_index": 0,
+      "original_length": 4987,
+      "optimized_length": 5120,
+      "final_segment_text": "...",
+      "round_logs": [ { "round": 0, ... }, { "round": 1, ... } ]
+    },
+    {
+      "segment_index": 1, ...
+    }
+  ]
+}
+```
+
+注意事项：
+- 分段是启发式按句号/英文标点拆分，不保证严格语义边界；可根据需要调低或调高 `--chunk-size`。
+- `--chunk-overlap` 通过前一段尾部补偿上下文连续性，过大可能重复；过小可能导致跨段衔接生硬。
+- 记忆检索在每个分段内部独立运行（默认 DummyEmbeddings 时效果有限）。如需跨段全局一致性，可后续再对 `final_text` 做一次整体精修。
+- 评审 Agent B 的建议仅针对当前分段，不跨分段；可以在后处理中汇总所有 `priority_issues` 聚合全局改进点。
+- 若文件非常大（> 数十万字符），建议先用外部工具粗清洗或分章，再交给本系统处理，减少调用成本。
+
+下一步可扩展：
+- 跨段全局汇总轮次（第二阶段整体协作）。
+- 分段并行处理（当前顺序执行）。
+- Diff 合并为段间全局摘要。
+
 ---
 ## 数据格式规范
 ### 合成数据 (synthesize 输出 JSONL，每行一个对象)

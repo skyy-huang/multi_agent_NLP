@@ -281,7 +281,6 @@ class MemoryManager:
 
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-import difflib
 
 class DualAgentAcademicSystem:
     def __init__(self, llm, tools, vectorstore, enable_tools: bool = True, enable_memory: bool = True):
@@ -319,10 +318,24 @@ class DualAgentAcademicSystem:
                 buf.append(l)
         return '\n'.join(buf).strip()
 
+    def _compute_diff(self, prev: str, current: str) -> str:
+        """Unified diff between previous and current text (truncated)."""
+        if prev is None:
+            return '(首轮无diff)'
+        import difflib as _df
+        diff_lines = _df.unified_diff(prev.splitlines(), current.splitlines(), lineterm='')
+        collected = []
+        for i, line in enumerate(diff_lines):
+            if i > 400:
+                collected.append('... <diff truncated>')
+                break
+            collected.append(line)
+        return '\n'.join(collected) if collected else '(无变化)'
+
     def _parse_scores(self, feedback: str) -> Dict[str, float]:
         import json as _json
         import re as _re
-        m = _re.search(r"\{\s*\"quality\".*?\}", feedback, flags=_re.S)
+        m = _re.search(r'\{\s*"quality".*?\}', feedback, flags=_re.S)
         if not m:
             return {}
         blob = m.group(0)
@@ -606,20 +619,79 @@ def load_seeds_from_file(path: Optional[str]) -> List[str]:
     return [l.strip() for l in p.read_text(encoding='utf-8').splitlines() if l.strip()]
 
 
-if not hasattr(DualAgentAcademicSystem, '_compute_diff'):
-    def _compute_diff(self, prev: str, current: str) -> str:
-        if prev is None:
-            return '(首轮无diff)'
-        import difflib as _df
-        diff_lines = _df.unified_diff(prev.splitlines(), current.splitlines(), lineterm='')
-        collected = []
-        for i, line in enumerate(diff_lines):
-            if i > 400:
-                collected.append('... <diff truncated>')
-                break
-            collected.append(line)
-        return '\n'.join(collected) if collected else '(无变化)'
-    DualAgentAcademicSystem._compute_diff = _compute_diff  # type: ignore
+# ---------- Long text splitting & file optimization helpers ----------
+def _split_long_text(text: str, chunk_size: int, overlap: int) -> List[str]:
+    """Split long text into roughly chunk_size segments with sentence-aware boundaries.
+    overlap: number of characters to prepend from previous chunk for continuity (ignored for first chunk)."""
+    text = text.strip()
+    if chunk_size <= 0:
+        return [text]
+    # Sentence tokenize (simple)
+    sentences = re.split(r'([。.!?]\s*)', text)  # keep delimiters
+    combined = []
+    # Reconstruct with delimiters preserved
+    buf = ''
+    for i in range(0, len(sentences), 2):
+        seg = sentences[i]
+        delim = sentences[i+1] if i+1 < len(sentences) else ''
+        piece = seg + delim
+        if len(buf) + len(piece) <= chunk_size:
+            buf += piece
+        else:
+            if buf:
+                combined.append(buf)
+            buf = piece
+    if buf:
+        combined.append(buf)
+    # Apply overlap
+    if overlap > 0 and len(combined) > 1:
+        with_overlap = []
+        prev_tail = ''
+        for idx, chunk in enumerate(combined):
+            if idx == 0:
+                with_overlap.append(chunk)
+            else:
+                # take tail of previous chunk
+                tail = prev_tail[-overlap:] if overlap < len(prev_tail) else prev_tail
+                with_overlap.append((tail + chunk).strip())
+            prev_tail = chunk
+        combined = with_overlap
+    return combined
+
+def optimize_text_file(system: DualAgentAcademicSystem, file_path: str, requirements: List[str], rounds: int, chunk_size: int, overlap: int, max_chunks: int = 0) -> Tuple[str, Dict]:
+    """Optimize a long text file by chunking and running multi-round collaborate per chunk.
+    Returns (final_combined_text, aggregated_report_dict)."""
+    p = Path(file_path)
+    if not p.exists():
+        raise FileNotFoundError(f'文本文件不存在: {file_path}')
+    raw = p.read_text(encoding='utf-8')
+    chunks = _split_long_text(raw, chunk_size, overlap)
+    if max_chunks > 0:
+        chunks = chunks[:max_chunks]
+    segment_logs = []
+    optimized_segments = []
+    for idx, chunk in enumerate(chunks):
+        print(f'🧩 处理分段 {idx+1}/{len(chunks)} (长度={len(chunk)})')
+        final_seg, log = system.collaborate(chunk, requirements, rounds=rounds)
+        optimized_segments.append(final_seg)
+        segment_logs.append({
+            'segment_index': idx,
+            'original_length': len(chunk),
+            'optimized_length': len(final_seg),
+            'final_segment_text': final_seg,
+            'round_logs': log
+        })
+    combined_final = '\n\n'.join(optimized_segments)
+    aggregated = {
+        'file': file_path,
+        'chunks': len(chunks),
+        'chunk_size': chunk_size,
+        'overlap': overlap,
+        'requirements': requirements,
+        'final_text': combined_final,
+        'segments': segment_logs,
+    }
+    return combined_final, aggregated
 
 
 def build_arg_parser():
@@ -627,6 +699,10 @@ def build_arg_parser():
     p.add_argument('command', nargs='?', default='demo', choices=['demo','synthesize','eval','distill'], help='运行模式')
     p.add_argument('--rounds', type=int, default=2, help='协作轮次')
     p.add_argument('--text', type=str, help='自定义初始文本 (demo)')
+    p.add_argument('--text-file', type=str, help='从文件读取初始文本 (长文本优化)')
+    p.add_argument('--chunk-size', type=int, default=5000, help='长文本分段字符数 (默认5000, <=0 不分段)')
+    p.add_argument('--chunk-overlap', type=int, default=200, help='分段重叠字符数 (默认200)')
+    p.add_argument('--max-chunks', type=int, default=0, help='限制最多处理的段数 (0=不限制)')
     p.add_argument('--requirements', type=str, help='逗号/分号分隔需求列表')
     p.add_argument('--seeds-file', type=str, help='种子文本文件路径 (synthesize)')
     p.add_argument('--out', type=str, help='输出文件路径')
@@ -637,6 +713,8 @@ def build_arg_parser():
     p.add_argument('--html-report', type=str, help='HTML 报告输出路径')
     p.add_argument('--distill-src', type=str, help='蒸馏源 JSONL (distill)')
     p.add_argument('--distill-out', type=str, help='蒸馏输出 JSONL')
+    # 新增：可选文本输出文件，用于将最终优化的学术表达写回同类型文本文件
+    p.add_argument('--out-text-file', type=str, help='将最终优化文本写入该路径 (例如 optimized_paper.txt)')
     return p
 
 
@@ -666,23 +744,52 @@ if __name__ == '__main__':
             except Exception as e:
                 print(f'⚠️ HTML 报告写入失败: {e}')
 
+    # 新增：将最终优化文本写入同类型文本文件的辅助函数
+    def _maybe_write_text(final_text: str, path: Optional[str]):
+        if path:
+            try:
+                out_path = Path(path)
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_text(final_text, encoding='utf-8')
+                print(f'📄 文本输出已写入: {out_path}')
+            except Exception as e:
+                print(f'⚠️ 文本输出写入失败: {e}')
+
     if ENABLE_INTERACTIVE:
         print('🚀 交互模式开启')
-        final_text, log = dual_agent_system.collaborate(args.text or '交互模式初稿', parse_requirements(args.requirements, ['学术表达提升']), rounds=rounds)
-        _maybe_write_report({'final': final_text, 'log': log}, args.report)
-        _maybe_write_html(final_text, log, args.html_report, title='交互模式报告')
+        if args.text_file:
+            # Long file path provided
+            reqs = parse_requirements(args.requirements, ['学术表达提升'])
+            final_text, aggregated = optimize_text_file(dual_agent_system, args.text_file, reqs, rounds=rounds, chunk_size=args.chunk_size, overlap=args.chunk_overlap, max_chunks=args.max_chunks)
+            _maybe_write_report({'final': final_text, 'aggregated': aggregated}, args.report)
+            _maybe_write_html(final_text, aggregated.get('segments', []), args.html_report, title='交互模式长文本报告')
+            _maybe_write_text(final_text, args.out_text_file)
+        else:
+            final_text, log = dual_agent_system.collaborate(args.text or '交互模式初稿', parse_requirements(args.requirements, ['学术表达提升']), rounds=rounds)
+            _maybe_write_report({'final': final_text, 'log': log}, args.report)
+            _maybe_write_html(final_text, log, args.html_report, title='交互模式报告')
+            _maybe_write_text(final_text, args.out_text_file)
     else:
         if args.command == 'demo':
             print('🚀 Demo 演示模式')
-            base_default = (
-                'This is a preliminary draft about multi-agent collaboration in academic writing.' if args.lang == 'en' else '这是一段关于多智能体协作进行学术写作优化的初稿。'
-            )
-            sample_text = args.text or base_default
-            reqs = parse_requirements(args.requirements, ['学术表达提升','逻辑结构优化'] if args.lang == 'zh' else ['academic polish','logical coherence'])
-            final_text, log = dual_agent_system.collaborate(sample_text, reqs, rounds=rounds)
-            print('\n📌 Final optimized text:\n', final_text)
-            _maybe_write_report({'final': final_text, 'log': log}, args.report)
-            _maybe_write_html(final_text, log, args.html_report, title='Demo 优化报告')
+            if args.text_file:
+                reqs = parse_requirements(args.requirements, ['学术表达提升','逻辑结构优化'] if args.lang == 'zh' else ['academic polish','logical coherence'])
+                final_text, aggregated = optimize_text_file(dual_agent_system, args.text_file, reqs, rounds=rounds, chunk_size=args.chunk_size, overlap=args.chunk_overlap, max_chunks=args.max_chunks)
+                print('\n📌 Long file optimized final text (truncated preview):\n', final_text[:800] + ('...' if len(final_text) > 800 else ''))
+                _maybe_write_report({'final': final_text, 'aggregated': aggregated}, args.report)
+                _maybe_write_html(final_text, aggregated.get('segments', []), args.html_report, title='长文本优化报告')
+                _maybe_write_text(final_text, args.out_text_file)
+            else:
+                base_default = (
+                    'This is a preliminary draft about multi-agent collaboration in academic writing.' if args.lang == 'en' else '这是一段关于多智能体协作进行学术写作优化的初稿。'
+                )
+                sample_text = args.text or base_default
+                reqs = parse_requirements(args.requirements, ['学术表达提升','逻辑结构优化'] if args.lang == 'zh' else ['academic polish','logical coherence'])
+                final_text, log = dual_agent_system.collaborate(sample_text, reqs, rounds=rounds)
+                print('\n📌 Final optimized text:\n', final_text)
+                _maybe_write_report({'final': final_text, 'log': log}, args.report)
+                _maybe_write_html(final_text, log, args.html_report, title='Demo 优化报告')
+                _maybe_write_text(final_text, args.out_text_file)
         elif args.command == 'synthesize':
             print('🧪 数据合成模式')
             seeds = load_seeds_from_file(args.seeds_file) or [
