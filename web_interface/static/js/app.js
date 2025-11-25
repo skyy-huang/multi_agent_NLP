@@ -12,10 +12,82 @@ class MultiAgentApp {
     }
 
     init() {
+        this.checkBootstrap();
         this.setupSocketConnection();
         this.setupEventListeners();
         this.loadConfiguration();
         this.setupTabNavigation();
+    }
+
+    checkBootstrap() {
+        // 检查Bootstrap是否正确加载
+        if (typeof bootstrap === 'undefined') {
+            console.error('Bootstrap JavaScript未加载！');
+            return;
+        }
+        console.log('Bootstrap版本:', bootstrap.Tooltip.VERSION);
+        
+        // 确保所有Bootstrap组件初始化
+        this.initializeBootstrapComponents();
+        console.log('Bootstrap已成功加载，所有交互功能应该可以正常使用');
+    }
+
+    initializeBootstrapComponents() {
+        // 专门为高级设置accordion添加点击处理
+        this.initAdvancedSettingsAccordion();
+
+        // 初始化所有tooltip组件
+        document.querySelectorAll('[data-bs-toggle="tooltip"]').forEach(tooltipEl => {
+            new bootstrap.Tooltip(tooltipEl);
+        });
+
+        // 初始化所有popover组件
+        document.querySelectorAll('[data-bs-toggle="popover"]').forEach(popoverEl => {
+            new bootstrap.Popover(popoverEl);
+        });
+    }
+
+    initAdvancedSettingsAccordion() {
+        // 获取高级设置的按钮和内容区域
+        const accordionButton = document.querySelector('#advancedSettings .accordion-button');
+        const collapseElement = document.getElementById('collapseAdvanced');
+        
+        if (!accordionButton || !collapseElement) {
+            console.warn('高级设置accordion元素未找到');
+            return;
+        }
+
+        console.log('初始化高级设置accordion');
+
+        // 移除Bootstrap的默认data属性，使用纯JavaScript控制
+        accordionButton.removeAttribute('data-bs-toggle');
+        accordionButton.removeAttribute('data-bs-target');
+
+        // 添加点击事件处理器
+        accordionButton.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            
+            console.log('高级设置按钮被点击');
+            
+            const isExpanded = collapseElement.classList.contains('show');
+            
+            if (isExpanded) {
+                // 折叠
+                collapseElement.classList.remove('show');
+                accordionButton.classList.add('collapsed');
+                accordionButton.setAttribute('aria-expanded', 'false');
+                console.log('高级设置已折叠');
+            } else {
+                // 展开
+                collapseElement.classList.add('show');
+                accordionButton.classList.remove('collapsed');
+                accordionButton.setAttribute('aria-expanded', 'true');
+                console.log('高级设置已展开');
+            }
+        });
+
+        console.log('高级设置accordion初始化完成');
     }
 
     setupSocketConnection() {
@@ -651,17 +723,26 @@ class MultiAgentApp {
             novelty: '新颖性'
         };
 
+        // 定义评分对应的图标
+        const scoreIcons = {
+            quality: 'bi-star-fill',
+            rigor: 'bi-shield-check',
+            logic: 'bi-diagram-3',
+            novelty: 'bi-lightbulb'
+        };
+
         Object.entries(scores).forEach(([key, value]) => {
             if (typeof value === 'number') {
-                const col = document.createElement('div');
-                col.className = 'col-md-3';
-                col.innerHTML = `
-                    <div class="score-card">
-                        <span class="score-value">${value.toFixed(1)}</span>
-                        <span class="score-label">${scoreLabels[key] || key}</span>
-                    </div>
+                const scoreCard = document.createElement('div');
+                scoreCard.className = 'score-card';
+                const icon = scoreIcons[key] || 'bi-circle-fill';
+                scoreCard.innerHTML = `
+                    <span class="score-value">${value.toFixed(1)}</span>
+                    <span class="score-label">
+                        <i class="bi ${icon} me-1"></i>${scoreLabels[key] || key}
+                    </span>
                 `;
-                scoresContainer.appendChild(col);
+                scoresContainer.appendChild(scoreCard);
             }
         });
         
@@ -724,9 +805,6 @@ class MultiAgentApp {
             'overall_quality': '总体质量'
         };
 
-        const metricsGrid = document.createElement('div');
-        metricsGrid.className = 'row';
-        
         let metricsCount = 0;
 
         Object.entries(advancedMetrics).forEach(([key, value]) => {
@@ -738,9 +816,6 @@ class MultiAgentApp {
                 
                 let metricKey = key.replace('_score', '').replace('_improvement', '');
                 let label = metricLabels[key] || metricLabels[metricKey] || key;
-                
-                const col = document.createElement('div');
-                col.className = 'col-md-4 col-lg-3 col-sm-6 mb-3';
                 
                 // 确定样式
                 let improvementClass = 'neutral';
@@ -755,26 +830,24 @@ class MultiAgentApp {
                     symbol = '↓';
                 }
                 
-                col.innerHTML = `
-                    <div class="metric-card">
-                        <div class="metric-name">${label}</div>
-                        <div class="metric-value">${displayValue}</div>
-                        <div class="metric-improvement ${improvementClass}">
-                            ${symbol} ${Math.abs(value).toFixed(4)}
-                        </div>
-                        <div class="metric-bar">
-                            <div class="metric-bar-fill" style="width: ${Math.max(0, Math.min(100, (value + 1) * 50))}%"></div>
-                        </div>
+                const metricCard = document.createElement('div');
+                metricCard.className = 'metric-card';
+                metricCard.innerHTML = `
+                    <div class="metric-name">${label}</div>
+                    <div class="metric-value">${displayValue}</div>
+                    <div class="metric-improvement ${improvementClass}">
+                        ${symbol} ${Math.abs(value).toFixed(4)}
+                    </div>
+                    <div class="metric-bar">
+                        <div class="metric-bar-fill" style="width: ${Math.max(0, Math.min(100, (value + 1) * 50))}%"></div>
                     </div>
                 `;
-                metricsGrid.appendChild(col);
+                advancedContainer.appendChild(metricCard);
                 metricsCount++;
             }
         });
 
-        if (metricsCount > 0) {
-            advancedContainer.appendChild(metricsGrid);
-        } else {
+        if (metricsCount === 0) {
             if (advancedDisplay) {
                 advancedDisplay.style.display = 'none';
             }
@@ -1037,8 +1110,12 @@ document.addEventListener('DOMContentLoaded', () => {
         window.multiAgentApp = app;
         console.log('应用初始化完成');
         
-        // 测试基本功能
+        // 确保Bootstrap组件在DOM完全渲染后再次初始化
         setTimeout(() => {
+            console.log('延迟初始化Bootstrap组件...');
+            app.initializeBootstrapComponents();
+            
+            // 测试基本功能
             const startBtn = document.getElementById('startOptimization');
             if (startBtn) {
                 console.log('找到开始优化按钮');
@@ -1052,7 +1129,7 @@ document.addEventListener('DOMContentLoaded', () => {
             } else {
                 console.error('未找到文本输入框');
             }
-        }, 1000);
+        }, 300);
         
     } catch (error) {
         console.error('应用初始化失败:', error);
