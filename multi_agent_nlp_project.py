@@ -8,7 +8,17 @@ from pathlib import Path
 import argparse
 import re
 import requests
+from pathlib import Path
+import sys
 
+# 添加项目根目录到路径以便导入 metrics 模块
+sys.path.insert(0, str(Path(__file__).parent))
+
+try:
+    from metrics import AcademicMetrics
+except ImportError:
+    print("⚠️ metrics 模块导入失败，将使用基础指标计算")
+    AcademicMetrics = None
 
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -505,6 +515,41 @@ class DualAgentAcademicSystem:
                 return top / total
             bigram_delta = round(_bigram_rep(text) - _bigram_rep(final_text), 3)
             last_scores = log[-1].get("scores", {}) if log else {}
+            
+            # ============ 使用新的学术指标系统 ============
+            advanced_metrics = {}
+            if AcademicMetrics:
+                try:
+                    # 计算优化前后的高级指标
+                    original_eval = AcademicMetrics.overall_quality_score(text)
+                    optimized_eval = AcademicMetrics.overall_quality_score(final_text)
+                    comparison = AcademicMetrics.compare_improvements(text, final_text)
+                    
+                    advanced_metrics = {
+                        'original_overall_score': round(original_eval['overall_score'], 4),
+                        'optimized_overall_score': round(optimized_eval['overall_score'], 4),
+                        'academic_formality_improvement': round(
+                            optimized_eval['scores']['academic_formality'] - original_eval['scores']['academic_formality'], 4),
+                        'citation_completeness_improvement': round(
+                            optimized_eval['scores']['citation_completeness'] - original_eval['scores']['citation_completeness'], 4),
+                        'novelty_improvement': round(
+                            optimized_eval['scores']['novelty'] - original_eval['scores']['novelty'], 4),
+                        'language_fluency_improvement': round(
+                            optimized_eval['scores']['language_fluency'] - original_eval['scores']['language_fluency'], 4),
+                        'sentence_balance_improvement': round(
+                            optimized_eval['scores']['sentence_balance'] - original_eval['scores']['sentence_balance'], 4),
+                        'argumentation_improvement': round(
+                            optimized_eval['scores']['argumentation'] - original_eval['scores']['argumentation'], 4),
+                        'expression_diversity_improvement': round(
+                            optimized_eval['scores']['expression_diversity'] - original_eval['scores']['expression_diversity'], 4),
+                        'structure_completeness_improvement': round(
+                            optimized_eval['scores']['structure_completeness'] - original_eval['scores']['structure_completeness'], 4),
+                        'tense_consistency_improvement': round(
+                            optimized_eval['scores']['tense_consistency'] - original_eval['scores']['tense_consistency'], 4),
+                    }
+                except Exception as e:
+                    print(f"⚠️ 计算高级指标失败: {e}")
+            
             results.append({
                 "id": idx,
                 "len_gain": round(len_gain, 3),
@@ -516,7 +561,8 @@ class DualAgentAcademicSystem:
                 "bigram_rep_delta": round(bigram_delta, 3),
                 "orig_len": len(w0),
                 "final_len": len(w1),
-                "scores": last_scores
+                "scores": last_scores,
+                "advanced_metrics": advanced_metrics
             })
         # aggregate
         if results:
@@ -534,6 +580,14 @@ class DualAgentAcademicSystem:
                 "novelty_avg": round(sum(r.get("scores", {}).get("novelty", 0) for r in results)/len(results), 3),
                 "n": len(results)
             }
+            
+            # 添加高级指标平均值
+            if results[0].get("advanced_metrics"):
+                adv_avg = {}
+                for metric in results[0]["advanced_metrics"].keys():
+                    adv_avg[f"{metric}_avg"] = round(
+                        sum(r.get("advanced_metrics", {}).get(metric, 0) for r in results) / len(results), 4)
+                avg.update(adv_avg)
         else:
             avg = {"len_gain_avg":0,"ttr_gain_avg":0,"repetition_delta_avg":0,"readability_gain_avg":0,"coherence_gain_avg":0,"sent_var_delta_avg":0,"bigram_rep_delta_avg":0,"quality_avg":0,"rigor_avg":0,"logic_avg":0,"novelty_avg":0,"n":0}
         report = {"summary": avg, "cases": results}
@@ -569,11 +623,119 @@ def generate_html_report(title: str, final_text: str, log: List[Dict], summary: 
     if 'round-box' in str(log[:1]):
         return ''
     def style():
-        return '<style>body{font-family:Segoe UI,Arial,sans-serif;max-width:960px;margin:32px auto;line-height:1.5}pre{background:#fafafa;border:1px solid #eee;padding:8px;white-space:pre-wrap}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:4px 8px;font-size:13px}.score-badge{display:inline-block;padding:2px 6px;border-radius:4px;background:#004d7a;color:#fff;font-size:12px;margin-right:4px}.diff-add{background:#e6ffe6}.diff-del{background:#ffecec;color:#900}.round-box{border:1px solid #ddd;padding:12px;margin:12px 0;border-radius:6px}.meta{color:#666;font-size:12px}details summary{cursor:pointer;font-weight:bold}</style>'
+        return '''<style>
+body{font-family:Segoe UI,Arial,sans-serif;max-width:1200px;margin:32px auto;line-height:1.5}
+pre{background:#fafafa;border:1px solid #eee;padding:8px;white-space:pre-wrap;overflow-x:auto}
+table{border-collapse:collapse;width:100%;margin:10px 0}
+td,th{border:1px solid #ccc;padding:6px 10px;font-size:13px;text-align:left}
+th{background:#f0f0f0;font-weight:bold}
+.score-badge{display:inline-block;padding:3px 8px;border-radius:4px;background:#004d7a;color:#fff;font-size:12px;margin-right:4px;margin-bottom:4px}
+.metric-value{font-weight:bold;color:#2c3e50}
+.improvement-positive{color:#27ae60;font-weight:bold}
+.improvement-negative{color:#e74c3c;font-weight:bold}
+.diff-add{background:#e6ffe6;padding:2px 4px}
+.diff-del{background:#ffecec;color:#900;padding:2px 4px}
+.round-box{border:1px solid #ddd;padding:12px;margin:12px 0;border-radius:6px;background:#fafafa}
+.meta{color:#666;font-size:12px}
+.metric-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:15px;margin:15px 0}
+.metric-card{border:1px solid #e0e0e0;padding:12px;border-radius:6px;background:white}
+.metric-card h4{margin:0 0 8px 0;color:#2c3e50;font-size:14px}
+.metric-card .value{font-size:20px;font-weight:bold;color:#3498db}
+.metric-card .label{font-size:12px;color:#7f8c8d}
+.chart-container{margin:15px 0;padding:15px;background:#f9f9f9;border-radius:6px}
+details summary{cursor:pointer;font-weight:bold;padding:8px;background:#f0f0f0;margin:8px 0;border-radius:4px}
+.progress-bar{width:100%;height:20px;background:#ecf0f1;border-radius:4px;overflow:hidden;margin:5px 0}
+.progress-fill{height:100%;background:linear-gradient(to right,#3498db,#2980b9);transition:width 0.3s}
+.warning{background:#fff3cd;border-left:4px solid #ffc107;padding:10px;margin:10px 0}
+.success{background:#d4edda;border-left:4px solid #28a745;padding:10px;margin:10px 0}
+</style>'''
     def render_scores(scores: Dict[str, float]) -> str:
         if not scores:
             return '<span class="meta">无评分</span>'
         return ' '.join(f'<span class="score-badge">{k}:{v:.1f}</span>' for k,v in scores.items() if isinstance(v,(int,float)))
+    
+    def render_metric_cards(metrics: Dict) -> str:
+        """生成指标卡片网格"""
+        if not metrics:
+            return ''
+        
+        html = '<div class="metric-grid">'
+        for key, value in metrics.items():
+            if key.endswith('_avg') or key.endswith('_improvement'):
+                # 提取易读的标签名
+                label = key.replace('_avg', '').replace('_improvement', '').replace('_', ' ').title()
+                
+                # 确定颜色和方向
+                if isinstance(value, (int, float)):
+                    if value > 0:
+                        color_class = 'improvement-positive'
+                        symbol = '↑'
+                    elif value < 0:
+                        color_class = 'improvement-negative'
+                        symbol = '↓'
+                    else:
+                        color_class = ''
+                        symbol = '='
+                    
+                    html += f'''
+                    <div class="metric-card">
+                        <h4>{label}</h4>
+                        <div class="value {color_class}">{symbol} {value:.4f}</div>
+                        <div class="label">改进幅度</div>
+                    </div>
+                    '''
+        html += '</div>'
+        return html
+    
+    def render_advanced_metrics(advanced_metrics: Dict) -> str:
+        """渲染高级学术指标"""
+        if not advanced_metrics:
+            return ''
+        
+        html = '<h3>高级学术指标</h3>'
+        html += '<div class="metric-grid">'
+        
+        # 原始和优化后的总体评分
+        if 'original_overall_score' in advanced_metrics and 'optimized_overall_score' in advanced_metrics:
+            orig = advanced_metrics['original_overall_score']
+            opt = advanced_metrics['optimized_overall_score']
+            improvement = opt - orig
+            
+            html += f'''
+            <div class="metric-card">
+                <h4>总体质量评分</h4>
+                <div style="font-size:12px;margin-bottom:8px">
+                    优化前: <span class="metric-value">{orig:.4f}</span><br/>
+                    优化后: <span class="metric-value">{opt:.4f}</span>
+                </div>
+                <div class="improvement-{('positive' if improvement > 0 else 'negative')}">
+                    {improvement:+.4f}
+                </div>
+            </div>
+            '''
+        
+        # 各维度改进
+        improvements = {k: v for k, v in advanced_metrics.items() if '_improvement' in k and k != 'overall_improvement'}
+        for metric, improvement in sorted(improvements.items())[:6]:  # 显示前6个
+            label = metric.replace('_improvement', '').replace('_', ' ').title()
+            color_class = 'improvement-positive' if improvement > 0 else 'improvement-negative'
+            
+            # 创建进度条
+            progress = max(0, min((improvement + 0.5) / 1.0 * 100, 100))  # 标准化到0-100%
+            
+            html += f'''
+            <div class="metric-card">
+                <h4>{label}</h4>
+                <div class="progress-bar">
+                    <div class="progress-fill" style="width:{progress}%"></div>
+                </div>
+                <div class="{color_class}">{improvement:+.4f}</div>
+            </div>
+            '''
+        
+        html += '</div>'
+        return html
+    
     def color_diff(diff_text: str) -> str:
         lines = []
         for ln in diff_text.splitlines():
@@ -584,22 +746,67 @@ def generate_html_report(title: str, final_text: str, log: List[Dict], summary: 
             else:
                 lines.append(f'<div>{_html_escape(ln)}</div>')
         return '\n'.join(lines)
+    
     parts = [f'<html><head><meta charset="utf-8"><title>{_html_escape(title)}</title>{style()}</head><body>']
-    parts.append(f'<h1>{_html_escape(title)}</h1>')
+    parts.append(f'<h1>📊 {_html_escape(title)}</h1>')
+    parts.append(f'<div class="meta">生成时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</div>')
+    
     if summary:
-        parts.append('<h2>指标汇总</h2><table><tr>' + ''.join(f'<th>{_html_escape(k)}</th>' for k in summary.keys()) + '</tr><tr>' + ''.join(f'<td>{_html_escape(str(v))}</td>' for v in summary.values()) + '</tr></table>')
-    parts.append('<h2>最终优化文本</h2><pre>' + _html_escape(final_text) + '</pre>')
-    parts.append('<h2>轮次日志</h2>')
+        parts.append('<h2>📈 指标汇总</h2>')
+        
+        # 显示基础指标表格
+        parts.append('<h3>基础文本指标</h3>')
+        parts.append('<table><tr>')
+        basic_metrics = {
+            'len_gain_avg': '长度变化',
+            'ttr_gain_avg': '词汇多样性提升',
+            'repetition_delta_avg': '重复度下降',
+            'readability_gain_avg': '可读性提升',
+            'coherence_gain_avg': '连贯性提升'
+        }
+        for key in basic_metrics:
+            parts.append(f'<th>{basic_metrics[key]}</th>')
+        parts.append('</tr><tr>')
+        for key in basic_metrics:
+            val = summary.get(key, 0)
+            color = 'improvement-positive' if val > 0 else 'improvement-negative' if val < 0 else ''
+            parts.append(f'<td class="{color}">{val:.4f}</td>')
+        parts.append('</tr></table>')
+        
+        # 显示Agent评分
+        parts.append('<h3>Agent B 评分汇总</h3>')
+        parts.append('<table><tr>')
+        agent_metrics = {
+            'quality_avg': '质量',
+            'rigor_avg': '严谨性',
+            'logic_avg': '逻辑性',
+            'novelty_avg': '新颖性'
+        }
+        for key in agent_metrics:
+            parts.append(f'<th>{agent_metrics[key]}</th>')
+        parts.append('</tr><tr>')
+        for key in agent_metrics:
+            val = summary.get(key, 0)
+            parts.append(f'<td><span class="metric-value">{val:.2f}/10</span></td>')
+        parts.append('</tr></table>')
+        
+        # 显示高级指标卡片
+        adv_metrics = {k: v for k, v in summary.items() if 'improvement' in k}
+        if adv_metrics:
+            parts.append(render_metric_cards(adv_metrics))
+    
+    parts.append('<h2>📝 最终优化文本</h2><pre>' + _html_escape(final_text) + '</pre>')
+    parts.append('<h2>📋 轮次详细日志</h2>')
     for entry in log[1:]:
         parts.append('<div class="round-box">')
         parts.append(f'<h3>Round {entry.get("round")}</h3>')
         parts.append(f'<div class="meta">时间: {entry.get("timestamp")}</div>')
-        parts.append('<h4>优化文本</h4><pre>' + _html_escape(entry.get('optimized_text','')) + '</pre>')
-        parts.append('<h4>Agent B 反馈</h4><pre>' + _html_escape(entry.get('agent_b_feedback','')) + '</pre>')
-        parts.append('<h4>评分</h4>' + render_scores(entry.get('scores',{})))
-        parts.append('<details><summary>Diff</summary>' + color_diff(entry.get('diff','')) + '</details>')
+        parts.append('<h4>✏️ 优化文本</h4><pre>' + _html_escape(entry.get('optimized_text','')) + '</pre>')
+        parts.append('<h4>📝 Agent B 反馈</h4><pre>' + _html_escape(entry.get('agent_b_feedback','')) + '</pre>')
+        parts.append('<h4>⭐ 评分</h4>' + render_scores(entry.get('scores',{})))
+        parts.append('<details><summary>🔍 文本差异 (Diff)</summary>' + color_diff(entry.get('diff','')) + '</details>')
         if entry.get('tool_observations') and entry.get('tool_observations') not in ('(无)','(工具已禁用)'):
-            parts.append('<details><summary>工具观察</summary><pre>' + _html_escape(entry.get('tool_observations','')) + '</pre></details>')
+            parts.append('<details><summary>🔧 工具调用观察</summary><pre>' + _html_escape(entry.get('tool_observations','')) + '</pre></details>')
         parts.append('</div>')
     parts.append('</body></html>')
     return '\n'.join(parts)

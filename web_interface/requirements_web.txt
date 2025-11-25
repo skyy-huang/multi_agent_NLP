@@ -5,7 +5,6 @@ python-socketio==5.9.0
 python-engineio==4.7.1
 Werkzeug==2.3.7
 
-# 主项目依赖
 langchain>=0.2.14
 langchain-openai>=0.1.0
 langchain-community>=0.2.0

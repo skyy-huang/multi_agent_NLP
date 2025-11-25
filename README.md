@@ -1,4 +1,4 @@
-# 多智能体学术写作优化系统 使用手册
+# 多智能体学术写作优化系统 
 
 > 主题：学术表达优化助手。系统包含两个智能体：Agent A 负责修改优化草稿，Agent B 负责严格审查并给出结构化评分与建议，二者多轮往复后输出最终结果；同时支持数据合成、蒸馏与 LoRA 微调原型。
 
@@ -391,8 +391,142 @@ python multi_agent_nlp_project.py [command] [--options]
 - **长篇报告 / 毕业论文草稿润色**：利用 `--text-file` + 分段重叠设计，处理较长的中文/英文学术文档，并输出整体优化结果与分段日志。
 
 ---
-## 10. 数据格式规范
-### 10.1 合成数据（synthesize 输出 JSONL）
+## 11. 🆕 高级学术指标系统
+
+项目新增了一套全面的学术文本质量评价指标，可自动计算并评估优化前后的改进。
+
+### 11.1 完整的评价指标列表
+
+| 指标 | 说明 | 范围 |
+|------|------|------|
+| **学术规范性** (academic_formality) | 检查学术词汇使用、短语规范，评估文本学术化程度 | 0-1 |
+| **引用完整性** (citation_completeness) | 评估引用格式、引用密度、论据充分性 | 0-1 |
+| **创新度** (novelty) | 检测新颖表述、突破性观点、方法创新标记词 | 0-1 |
+| **语言流畅度** (language_fluency) | 基于改进的阅读难度指数（Flesch 中文版） | 0-1 |
+| **句子复杂度平衡** (sentence_complexity_balance) | 检测句长分布、变异系数，避免全长或全短 | 0-1 |
+| **论证强度** (argumentation_strength) | 评估前提、论据、结论的完整性与逻辑关联 | 0-1 |
+| **表达多样性** (expression_diversity) | 词汇多样性 (TTR)、句式多样性、避免重复 | 0-1 |
+| **结构完整性** (structure_completeness) | 检测引言、主体、结论、局限讨论等部分 | 0-1 |
+| **时态一致性** (tense_consistency) | 检测过去式/现在式使用的一致性 | 0-1 |
+| **综合评分** (overall_score) | 所有指标的加权平均 (可自定义权重) | 0-1 |
+
+### 11.2 改进指标
+
+除了单项评分外，系统还计算了优化前后的改进幅度：
+
+- `*_improvement`：各维度的改进差值（正值表示改进）
+- `overall_improvement`：总体质量的改进幅度
+- `improvement_rate`：改进百分比
+
+### 11.3 使用新指标评估
+
+#### 方式1：直接在 eval 模式中使用
+```bash
+python multi_agent_nlp_project.py eval \
+  --rounds 2 \
+  --report eval_with_metrics.json \
+  --html-report eval_with_metrics.html
+```
+
+生成的报告将包含：
+- 基础文本指标汇总表
+- Agent B 评分汇总
+- 高级学术指标卡片（带改进箭头和进度条）
+
+#### 方式2：在 Python 代码中使用
+```python
+from metrics import AcademicMetrics
+
+# 计算单个文本的所有指标
+text = "你的学术文本..."
+result = AcademicMetrics.overall_quality_score(text)
+
+# 查看所有指标
+print(result['scores'])  # 单项评分
+print(result['overall_score'])  # 综合评分
+
+# 对比优化前后的改进
+original = "原始文本..."
+optimized = "优化文本..."
+comparison = AcademicMetrics.compare_improvements(original, optimized)
+
+for metric, improvement in comparison['metric_improvements'].items():
+    print(f"{metric}: {improvement:+.4f}")
+```
+
+#### 方式3：快速评估脚本
+```bash
+python -c "from metrics import quick_evaluate; quick_evaluate('你的文本...')"
+```
+
+输出将显示：
+```
+============================================================
+学术文本质量评估报告
+============================================================
+
+文本统计:
+  字数: 150
+  句数: 5
+  段数: 2
+
+各维度评分 (0-1):
+  Academic Formality       0.7850 [████████████████░░░░]
+  Citation Completeness    0.5200 [██████████░░░░░░░░░░]
+  Novelty                  0.4500 [█████████░░░░░░░░░░░]
+  Language Fluency         0.8200 [████████████████░░░░]
+  ...
+
+整体综合评分: 0.6520
+============================================================
+```
+
+### 11.4 HTML 报告中的指标可视化
+
+新的 HTML 报告包含以下可视化元素：
+
+- **指标卡片网格**：展示每个改进维度的改进幅度，用颜色和箭头表示正/负改进
+- **进度条**：直观显示改进强度
+- **颜色编码**：
+  - 🟢 绿色：正向改进
+  - 🔴 红色：负向改进
+  - ⬜ 灰色：无明显变化
+
+### 11.5 自定义权重
+
+可以自定义各指标的权重：
+
+```python
+from metrics import AcademicMetrics
+
+custom_weights = {
+    'academic_formality': 0.20,      # 提高学术规范权重
+    'citation_completeness': 0.15,   # 强调引用完整性
+    'novelty': 0.10,
+    'language_fluency': 0.12,
+    'sentence_balance': 0.08,
+    'argumentation': 0.15,
+    'expression_diversity': 0.08,
+    'structure_completeness': 0.10,
+    'tense_consistency': 0.02
+}
+
+result = AcademicMetrics.overall_quality_score(text, weights=custom_weights)
+```
+
+### 11.6 指标应用场景
+
+| 场景 | 推荐指标 | 权重调整 |
+|------|----------|---------|
+| 学术论文 | 全部 | 提高学术规范、引用完整性 |
+| 技术文档 | 除新颖性外 | 提高结构完整性、流畅度 |
+| 创新论文 | 全部 | 提高新颖性、论证强度 |
+| 综述文章 | 全部 | 提高结构、引用完整性 |
+| 网络文章 | 流畅度、多样性 | 降低学术规范权重 |
+
+---
+## 12. 数据格式规范
+### 12.1 合成数据（synthesize 输出 JSONL）
 每行一个 JSON 对象，示例结构：
 ```json
 {
@@ -411,12 +545,12 @@ python multi_agent_nlp_project.py [command] [--options]
 }
 ```
 
-### 10.2 蒸馏对（distill 输出 JSONL）
+### 12.2 蒸馏对（distill 输出 JSONL）
 ```json
 {"instruction": "优化以下学术段落，满足需求: 学术表达提升, 结构清晰\n原文: ...", "output": "teacher 信号文本", "scores": {"quality":8.0,"rigor":7.0}}
 ```
 
-### 10.3 LoRA 训练拼接格式
+### 12.3 LoRA 训练拼接格式
 `lora_distill.py` 会将每条 `instruction/output` 拼接为：
 ```text
 指令:
@@ -427,18 +561,22 @@ python multi_agent_nlp_project.py [command] [--options]
 ```
 用于常规自回归语言模型微调。
 
-### 10.4 报告 JSON / HTML
+### 12.4 报告 JSON / HTML
 - JSON 报告（`--report`）：
   - demo 模式：`{"final": 最终文本, "log": 协作日志}`；
   - 长文本模式：`{"final": 最终整篇文本, "aggregated": {"segments": [...], ...}}`；
-  - eval 模式：`{"summary": 指标均值, "cases": 单条样本指标}`；
+  - eval 模式：`{"summary": 指标均值, "cases": 单条样本指标}` **（现已包含高级学术指标）**；
   - synthesize / distill 模式：包含生成文件路径等元信息。
 - HTML 报告（`--html-report`）：
   - 按轮展示优化文本、Agent B 反馈、评分、Diff（新内容高亮为绿色，删除为红色）、工具调用观测；
-  - eval 模式下展示指标汇总表格与各案例的概览。
+  - eval 模式下展示指标汇总表格与各案例的概览 **（新增高级学术指标卡片、进度条、改进可视化）**；
+  - 支持响应式布局和暗色主题支持。
 
 ---
-## 11. 评估指标含义
+## 13. 评估指标含义
+
+### 13.1 基础文本指标
+
 | 指标 | 说明 |
 |------|------|
 | `len_gain` | 长度变化比例 `(final_len - orig_len) / orig_len` |
@@ -450,10 +588,25 @@ python multi_agent_nlp_project.py [command] [--options]
 | `bigram_rep_delta` | 高频二元组占比下降（重复模式减少） |
 | `quality/rigor/logic/novelty` | Agent B 在 JSON 中给出的主观评分均值 |
 
-这些指标由 `DualAgentAcademicSystem.evaluate()` 计算并在 eval 模式中聚合输出。
+### 13.2 高级学术指标
+
+| 指标 | 说明 | 示例 |
+|------|------|------|
+| `academic_formality_improvement` | 学术规范性提升 | +0.15 表示学术表达更规范 |
+| `citation_completeness_improvement` | 引用完整性提升 | +0.12 表示论据更充分 |
+| `novelty_improvement` | 创新度提升 | +0.08 表示更具突破性 |
+| `language_fluency_improvement` | 语言流畅度提升 | +0.10 表示更易阅读 |
+| `sentence_balance_improvement` | 句子复杂度平衡度提升 | +0.05 表示句长分布更合理 |
+| `argumentation_improvement` | 论证强度提升 | +0.12 表示逻辑论证更完整 |
+| `expression_diversity_improvement` | 表达多样性提升 | +0.08 表示词汇更丰富 |
+| `structure_completeness_improvement` | 结构完整性提升 | +0.10 表示段落划分更清晰 |
+| `tense_consistency_improvement` | 时态一致性提升 | +0.03 表示时态使用更统一 |
+| `overall_improvement` | 综合质量提升 | +0.09 表示总体质量提升9% |
+
+这些指标由 `DualAgentAcademicSystem.evaluate()` 和 `AcademicMetrics.compare_improvements()` 计算并在 eval 模式中聚合输出。
 
 ---
-## 12. 性能与调优建议
+## 14. 性能与调优建议
 | 目标 | 建议 |
 |------|------|
 | 提升速度 | 降低 `--rounds`、缩短初稿、在不关键场景下关闭工具与记忆（`--no-tools --no-memory`） |
@@ -464,7 +617,7 @@ python multi_agent_nlp_project.py [command] [--options]
 | 训练更平稳 | 增大 `--epochs`、设置合理的 `--warmup-ratio`、按数据规模调整 `--gradient-accum` |
 
 ---
-## 13. 常见问题 FAQ
+## 15. 常见问题 FAQ
 1. **导入 faiss 失败？**  
    - 已自动回退到 `SimpleVectorStore`，功能仍可使用；如需更高召回质量与性能，可安装 `faiss-cpu`。
 
@@ -490,7 +643,7 @@ python multi_agent_nlp_project.py [command] [--options]
    - 内部对 Diff 有 400 行的截断逻辑，可根据需要在 `DualAgentAcademicSystem._compute_diff` 中调整。
 
 ---
-## 14. 后续扩展建议
+## 16. 后续扩展建议
 - 在 `_plan_and_act()` 中新增领域检索工具（如论文数据库 API），增强事实依据；
 - 扩展 Agent B 的评分维度与诊断模板，例如增加“清晰度”“严谨引用”“实验完整性”等；
 - 引入并行分段处理与跨段全局精修，进一步提升长文档整体一致性；

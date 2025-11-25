@@ -664,6 +664,121 @@ class MultiAgentApp {
                 scoresContainer.appendChild(col);
             }
         });
+        
+        // 显示高级学术指标
+        this.displayAdvancedMetrics(result);
+    }
+
+    displayAdvancedMetrics(result) {
+        const advancedDisplay = document.getElementById('advancedMetricsDisplay');
+        const advancedContainer = document.getElementById('advancedMetricsContainer');
+        
+        if (!advancedContainer) {
+            console.warn('Advanced metrics container not found');
+            return;
+        }
+
+        advancedContainer.innerHTML = '';
+        
+        // 首先尝试从result.advanced_metrics获取（来自后端）
+        let advancedMetrics = result.advanced_metrics || {};
+        
+        // 如果没有，则从log中获取
+        if (Object.keys(advancedMetrics).length === 0 && result.log && result.log.length > 0) {
+            const lastRound = result.log[result.log.length - 1];
+            advancedMetrics = lastRound.advanced_metrics || {};
+        }
+
+        // 如果没有高级指标，隐藏容器并返回
+        if (Object.keys(advancedMetrics).length === 0) {
+            if (advancedDisplay) {
+                advancedDisplay.style.display = 'none';
+            }
+            return;
+        }
+
+        // 显示容器
+        if (advancedDisplay) {
+            advancedDisplay.style.display = 'block';
+        }
+
+        const metricLabels = {
+            'academic_formality': '学术规范性',
+            'academic_formality_score': '学术规范性',
+            'citation_completeness': '引用完整性',
+            'citation_completeness_score': '引用完整性',
+            'novelty': '创新度',
+            'novelty_score': '创新度',
+            'language_fluency': '语言流畅度',
+            'language_fluency_score': '语言流畅度',
+            'sentence_balance': '句子平衡',
+            'sentence_balance_score': '句子平衡',
+            'argumentation': '论证强度',
+            'argumentation_strength': '论证强度',
+            'expression_diversity': '表达多样性',
+            'expression_diversity_score': '表达多样性',
+            'structure_completeness': '结构完整性',
+            'structure_completeness_score': '结构完整性',
+            'tense_consistency': '时态一致',
+            'tense_consistency_score': '时态一致',
+            'overall_quality': '总体质量'
+        };
+
+        const metricsGrid = document.createElement('div');
+        metricsGrid.className = 'row';
+        
+        let metricsCount = 0;
+
+        Object.entries(advancedMetrics).forEach(([key, value]) => {
+            if (typeof value === 'number') {
+                // 确保不显示平均值或其他聚合字段
+                if (key.includes('_avg') || key === 'overall_quality') {
+                    return;
+                }
+                
+                let metricKey = key.replace('_score', '').replace('_improvement', '');
+                let label = metricLabels[key] || metricLabels[metricKey] || key;
+                
+                const col = document.createElement('div');
+                col.className = 'col-md-4 col-lg-3 col-sm-6 mb-3';
+                
+                // 确定样式
+                let improvementClass = 'neutral';
+                let symbol = '→';
+                let displayValue = value.toFixed(3);
+                
+                if (value > 0.02) {
+                    improvementClass = 'positive';
+                    symbol = '↑';
+                } else if (value < -0.02) {
+                    improvementClass = 'negative';
+                    symbol = '↓';
+                }
+                
+                col.innerHTML = `
+                    <div class="metric-card">
+                        <div class="metric-name">${label}</div>
+                        <div class="metric-value">${displayValue}</div>
+                        <div class="metric-improvement ${improvementClass}">
+                            ${symbol} ${Math.abs(value).toFixed(4)}
+                        </div>
+                        <div class="metric-bar">
+                            <div class="metric-bar-fill" style="width: ${Math.max(0, Math.min(100, (value + 1) * 50))}%"></div>
+                        </div>
+                    </div>
+                `;
+                metricsGrid.appendChild(col);
+                metricsCount++;
+            }
+        });
+
+        if (metricsCount > 0) {
+            advancedContainer.appendChild(metricsGrid);
+        } else {
+            if (advancedDisplay) {
+                advancedDisplay.style.display = 'none';
+            }
+        }
     }
 
     displayRoundDetails(result) {
