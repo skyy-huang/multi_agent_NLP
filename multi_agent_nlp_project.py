@@ -4,20 +4,54 @@ from datetime import datetime
 from typing import Dict, List, Tuple, Optional
 from dotenv import load_dotenv
 import json
-from pathlib import Path
 import argparse
 import re
 import requests
-from pathlib import Path
 import sys
+from pathlib import Path  # 重新添加 Path 导入以修复类型引用
+
+# 在低依赖环境下回退 PromptTemplate 与 StrOutputParser
+try:
+    from langchain_core.prompts import PromptTemplate
+    from langchain_core.output_parsers import StrOutputParser
+
+    _PROMPT_AVAILABLE = True
+except Exception as _e:
+    print(f"⚠️ langchain_core prompts/output_parsers 导入失败({_e}); 使用轻量 stub")
+    _PROMPT_AVAILABLE = False
+
+
+    class PromptTemplate:
+        def __init__(self, template: str):
+            self.template = template
+
+        @classmethod
+        def from_template(cls, t: str):
+            return cls(t)
+
+        def format(self, **kwargs):
+            return self.template.format(**kwargs)
+
+        def __or__(self, other):  # 链接操作兼容
+            return other
+
+
+    class StrOutputParser:
+        def __or__(self, other):
+            return other
+
+        def invoke(self, x):  # 保留接口
+            return x
+
+# 移除重复的 Path 导入，必要时再局部导入
 
 # 添加项目根目录到路径以便导入 metrics 模块
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, os.path.dirname(__file__))
 
 try:
     from metrics import AcademicMetrics
 except ImportError:
-    print("⚠️ metrics 模块导入失败，将使用基础指标计算")
+    print("⚠️ metrics 模块导入失败，将使用基础指标计算占位逻辑")
     AcademicMetrics = None
 
 load_dotenv()
@@ -36,21 +70,28 @@ if IS_DEEPSEEK:
 
 
 class DummyLLM:
-    """Fallback LLM used when API keys are missing; mimics .invoke interface."""
+    """Fallback LLM used when API keys are missing; mimics .invoke interface and is Runnable-compatible."""
+
     def __init__(self):
         self.model_name = "dummy-llm"
+
     def invoke(self, prompt: Dict | str):
         if isinstance(prompt, dict):
             return f"[DummyLLM response for keys: {list(prompt.keys())}]"
         return "[DummyLLM generic response]"
-    def __or__(self, other):  # allow chaining compatibility
-        return other
+
+    def __call__(self, prompt: Dict | str):  # 使其可调用, 便于 LangChain 将其视为 Runnable
+        return self.invoke(prompt)
+
+    def __or__(self, other):  # 在链式操作中返回自身, 让 LangChain 对 DummyLLM 执行调用
+        return self
 
 
 class HTTPFallbackChat:
     """
 直接使用 OpenAI 兼容接口的简单回退客户端。满足 .invoke(dict|str) 接口。
     """
+
     def __init__(self, base_url: str, api_key: str, model: str, timeout: float = 30.0):
         self.base_url = base_url.rstrip('/')
         self.api_key = api_key
@@ -61,9 +102,10 @@ class HTTPFallbackChat:
             self.endpoint = f"{self.base_url}/chat/completions"
         else:
             self.endpoint = f"{self.base_url}/v1/chat/completions"
+
     def invoke(self, prompt: Dict | str):
         if isinstance(prompt, dict):
-            # 将字典内容拼合为 user 消息
+            # 将字典内容拼合为 user 消 Messages
             user_content = '\n'.join(f"{k}: {v}" for k, v in prompt.items())
         else:
             user_content = str(prompt)
@@ -88,6 +130,10 @@ class HTTPFallbackChat:
             return data.get("choices", [{}])[0].get("message", {}).get("content", "[No content]")
         except Exception as e:
             return f"[HTTPFallbackChat Exception: {e}]"
+
+    def __call__(self, prompt: Dict | str):  # 增加直接调用支持
+        return self.invoke(prompt)
+
     def __or__(self, other):
         return other
 
@@ -125,12 +171,44 @@ def init_llm():
 
 llm = init_llm()
 
+# LangChain / 工具层软回退：若依赖缺失则使用轻量占位实现保持接口兼容
 try:
-    from langchain_core.tools import Tool
-    from langchain_experimental.utilities import PythonREPL
-    from langchain_community.utilities import SerpAPIWrapper
-except ImportError as e:
-    raise RuntimeError(f"Missing langchain packages: {e}. Run pip install -r requirements.txt")
+    from langchain_core.tools import Tool  # type: ignore
+    from langchain_experimental.utilities import PythonREPL  # type: ignore
+    from langchain_community.utilities import SerpAPIWrapper  # type: ignore
+
+    _LC_AVAILABLE = True
+except Exception as e:
+    print(f"⚠️ LangChain 相关依赖缺失或导入失败({e}); 使用轻量 stub 替代，功能受限但流程可继续。")
+    _LC_AVAILABLE = False
+
+
+    class Tool:  # minimal stub
+        def __init__(self, name: str, func, description: str = ""):
+            self.name = name
+            self.func = func
+            self.description = description
+
+        def run(self, *args, **kwargs):
+            return self.func(*args, **kwargs)
+
+
+    class PythonREPL:  # stub REPL
+        def run(self, code: str) -> str:
+            try:
+                local_env = {}
+                exec(code, {}, local_env)
+                return str(local_env)[:500]
+            except Exception as e2:
+                return f"[PythonREPL stub 异常: {e2}]"
+
+
+    class SerpAPIWrapper:  # stub search
+        def __init__(self, *_, **__):
+            pass
+
+        def run(self, query: str) -> str:
+            return f"[SerpAPI stub 未配置，无法真实检索: {query}]"
 
 TOOLS: List[Tool] = []  # add explicit type for clarity
 if SERPAPI_API_KEY:
@@ -144,6 +222,8 @@ if SERPAPI_API_KEY:
 else:
     def _search_stub(q: str) -> str:
         return f"[SerpAPI 未配置，无法执行搜索: {q}]"
+
+
     search_tool = Tool(name="网络搜索", func=_search_stub, description="SerpAPI 未配置占位工具")
     TOOLS.append(search_tool)
 
@@ -193,20 +273,30 @@ except ImportError as e:
             def __init__(self, page_content: str, metadata: Optional[Dict] = None):
                 self.page_content = page_content
                 self.metadata = metadata or {}
+
+
     class LCEmbeddings:  # type: ignore
         _dim = EMBED_DIM if 'EMBED_DIM' in globals() else 1536
+
         def embed_query(self, x: str):
             return [0.0] * self._dim
+
         def embed_documents(self, xs: List[str]):
             return [[0.0] * self._dim for _ in xs]
 EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "text-embedding-3-small")
+
+
 class DummyEmbeddings:
     def embed_query(self, t: str):
         return [0.0] * EMBED_DIM
+
     def embed_documents(self, docs: List[str]):
         return [[0.0] * EMBED_DIM for _ in docs]
+
     def __call__(self, t: str):
         return self.embed_query(t)
+
+
 if OPENAI_API_KEY:
     try:
         if IS_DEEPSEEK:
@@ -215,6 +305,7 @@ if OPENAI_API_KEY:
             embeddings_model = DummyEmbeddings()
         else:
             from langchain_openai import OpenAIEmbeddings  # lazy import
+
             embeddings_model = OpenAIEmbeddings(
                 model=EMBED_MODEL_NAME,
                 api_key=(lambda: OPENAI_API_KEY),
@@ -229,24 +320,31 @@ else:
 
 _DEF_WORD_RE = re.compile(r"[\u4e00-\u9fff]|[A-Za-z0-9_]+")
 
+
 def _simple_tokenize(text: str) -> List[str]:
     return _DEF_WORD_RE.findall(text or "")
+
 
 if USE_FAISS:
     class EmbeddingAdapter(LCEmbeddings):
         """Embeddings adapter implementing LangChain Embeddings interface to silence deprecation warnings."""
+
         def __init__(self, base):
             self.base = base
+
         def embed_query(self, x: str) -> List[float]:
             try:
                 return self.base.embed_query(x)
             except Exception:
                 return [0.0] * EMBED_DIM
+
         def embed_documents(self, xs: List[str]) -> List[List[float]]:
             try:
                 return self.base.embed_documents(xs)
             except Exception:
                 return [[0.0] * EMBED_DIM for _ in xs]
+
+
     adapter = EmbeddingAdapter(embeddings_model)
     index = faiss.IndexFlatL2(EMBED_DIM)
     vectorstore = FAISS(adapter, index, InMemoryDocstore({}), {})
@@ -255,25 +353,33 @@ else:
     class SimpleVectorStore:
         def __init__(self):
             self.docs: List[Document] = []
+
         def add_documents(self, docs: List[Document]):
             self.docs.extend(docs)
+
         def similarity_search(self, query: str, k: int = 3) -> List[Document]:
             q_tokens = set(_simple_tokenize(query))
+
             def score(doc: Document):
                 d_tokens = set(_simple_tokenize(doc.page_content))
                 if not q_tokens or not d_tokens:
                     return 0.0
                 return len(q_tokens & d_tokens) / len(q_tokens | d_tokens)
+
             ranked = sorted(self.docs, key=score, reverse=True)
             return ranked[:k]
+
+
     vectorstore = SimpleVectorStore()
-    print("🧠 向量数据库简化版初始化完成(无FAISS)")
+    print("🧠 向量数据���简化版初始化完成(无FAISS)")
+
 
 class MemoryManager:
     def __init__(self, vs, namespace: str = "global"):
         self.vs = vs
         self.namespace = namespace
         self._counter = 0
+
     def add_memory(self, text: str, metadata: Optional[Dict] = None):
         try:
             meta = metadata or {}
@@ -283,6 +389,7 @@ class MemoryManager:
             self._counter += 1
         except Exception as e:
             print(f"⚠️ 写入记忆失败: {e}")
+
     def recall(self, query: str, k: int = 3) -> List[str]:
         try:
             res = self.vs.similarity_search(query, k=k)
@@ -291,12 +398,28 @@ class MemoryManager:
             print(f"⚠️ 读取记忆失败: {e}")
             return []
 
+
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
+
 class DualAgentAcademicSystem:
-    def __init__(self, llm, tools, vectorstore, enable_tools: bool = True, enable_memory: bool = True):
+    def __init__(self, llm, tools, vectorstore, enable_tools: bool = True, enable_memory: bool = True,
+                 agent_a_llm=None, agent_b_llm=None):
+        """Dual-agent academic system.
+
+        Args:
+            llm: Default LLM used for both agents when agent_a_llm/agent_b_llm are not provided.
+            tools: LangChain Tool list.
+            vectorstore: Vector store or SimpleVectorStore.
+            enable_tools: Whether to use external tools.
+            enable_memory: Whether to use vectorstore-backed long-term memory.
+            agent_a_llm: Optional dedicated LLM for Agent A (optimizer), e.g. local Qwen.
+            agent_b_llm: Optional dedicated LLM for Agent B (reviewer), e.g. remote DeepSeek.
+        """
         self.llm = llm
+        self.agent_a_llm = agent_a_llm or llm
+        self.agent_b_llm = agent_b_llm or llm
         self.tools_enabled = enable_tools
         self.memory_enabled = enable_memory
         self.tools = {t.name: t for t in tools}
@@ -312,8 +435,9 @@ class DualAgentAcademicSystem:
         self.agent_b_template = PromptTemplate.from_template(
             """你是Agent B - 学术评审与对抗质询专家。\n轮次: 第{round_num}轮\n用户需求: {user_requirements}\n优化文本:\n{optimized_text}\n请评审并输出(严格包含以下板块与数值)：\n**本轮改进评价：**\n[总体评价]\n\n**评分(请使用JSON格式)**\n{{"quality": <1-10>, "rigor": <1-10>, "logic": <1-10>, "novelty": <1-10>, "priority_issues": <描述>}}\n\n**剩余主要问题：**\n[...]\n\n**下轮重点建议：**\n1. [...]\n2. [...]\n\n**改进优先级：**\n[高/中/低 分层列出]"""
         )
-        self.agent_a_chain = self.agent_a_template | self.llm | StrOutputParser()
-        self.agent_b_chain = self.agent_b_template | self.llm | StrOutputParser()
+        # use dedicated LLMs for each agent
+        self.agent_a_chain = self.agent_a_template | self.agent_a_llm | StrOutputParser()
+        self.agent_b_chain = self.agent_b_template | self.agent_b_llm | StrOutputParser()
 
     @staticmethod
     def _extract_section(text: str, start_token: str, end_token: str) -> str:
@@ -347,8 +471,9 @@ class DualAgentAcademicSystem:
     def _parse_scores(self, feedback: str) -> Dict[str, float]:
         import json as _json
         import re as _re
-        # 使用原始字符串避免冗余转义告警
-        m = _re.search(r"\{\s*\"quality\".*?\}", feedback, flags=_re.S)
+        # 修正正则：去除冗余的转义 \}
+        # _parse_scores 中原模式 r"\{\s*\"quality\".*?}" -> 保留不转义的 }
+        m = _re.search(r"\{\s*\"quality\".*?}", feedback, flags=_re.S)
         if not m:
             return {}
         blob = m.group(0)
@@ -383,8 +508,10 @@ class DualAgentAcademicSystem:
             observations.append(f"执行Python -> 输出: {str(out)[:200]}")
         return "\n".join(observations) if observations else "(无)"
 
-    def collaborate(self, user_text: str, user_requirements: List[str], language: str = "中文", rounds: int = 3) -> Tuple[str, List[Dict]]:
-        self.collaboration_log = [{"round": 0, "user_input": user_text, "requirements": user_requirements, "timestamp": datetime.now().isoformat()}]
+    def collaborate(self, user_text: str, user_requirements: List[str], language: str = "中文", rounds: int = 3) -> \
+    Tuple[str, List[Dict]]:
+        self.collaboration_log = [{"round": 0, "user_input": user_text, "requirements": user_requirements,
+                                   "timestamp": datetime.now().isoformat()}]
         current_text = user_text
         previous_feedback = ""
         last_scores = {}
@@ -433,7 +560,8 @@ class DualAgentAcademicSystem:
             time.sleep(0.15)
         return current_text, self.collaboration_log
 
-    def synthesize_dataset(self, seeds: List[str], requirements: List[str], rounds: int = 3, out_path: Optional[Path] = None) -> Path:
+    def synthesize_dataset(self, seeds: List[str], requirements: List[str], rounds: int = 3,
+                           out_path: Optional["Path"] = None) -> "Path":
         data_dir = Path("data")
         data_dir.mkdir(parents=True, exist_ok=True)
         if out_path is None:
@@ -474,14 +602,16 @@ class DualAgentAcademicSystem:
         sentences = [s for s in re.split(r'[。.!?]\s*', text) if s.strip()]
         if len(sentences) < 2:
             return 0.0
+
         def tokens(s):
             return set(self._tokenize_zh(s))
+
         overlaps = []
         for a, b in zip(sentences[:-1], sentences[1:]):
             ta, tb = tokens(a), tokens(b)
             if ta and tb:
                 overlaps.append(len(ta & tb) / len(ta | tb))
-        return round(sum(overlaps)/len(overlaps), 4) if overlaps else 0.0
+        return round(sum(overlaps) / len(overlaps), 4) if overlaps else 0.0
 
     def evaluate(self, cases: List[Tuple[str, List[str]]], rounds: int = 2) -> Dict:
         results = []
@@ -499,57 +629,67 @@ class DualAgentAcademicSystem:
             rep1 = sum(x for _, x in c1.most_common(5)) / max(1, len(w1))
             readability_gain = self._readability_proxy(final_text) - self._readability_proxy(text)
             coherence_gain = self._coherence_proxy(final_text) - self._coherence_proxy(text)
+
             def _sentence_lengths(t: str):
                 sents = [s for s in re.split(r'[。.!?]\s*', t) if s.strip()]
                 return [len(s) for s in sents] if sents else []
+
             import statistics
             var0 = statistics.pvariance(_sentence_lengths(text)) if _sentence_lengths(text) else 0.0
             var1 = statistics.pvariance(_sentence_lengths(final_text)) if _sentence_lengths(final_text) else 0.0
             var_delta = round(var0 - var1, 3)
+
             def _bigram_rep(t: str):
                 toks = w1 if t == final_text else w0
-                bigrams = [tuple(toks[i:i+2]) for i in range(len(toks)-1)]
+                bigrams = [tuple(toks[i:i + 2]) for i in range(len(toks) - 1)]
                 bc = Counter(bigrams)
                 total = len(bigrams) or 1
                 top = sum(v for _, v in bc.most_common(5))
                 return top / total
+
             bigram_delta = round(_bigram_rep(text) - _bigram_rep(final_text), 3)
             last_scores = log[-1].get("scores", {}) if log else {}
-            
+
             # ============ 使用新的学术指标系统 ============
             advanced_metrics = {}
             if AcademicMetrics:
                 try:
-                    # 计算优化前后的高级指标
                     original_eval = AcademicMetrics.overall_quality_score(text)
                     optimized_eval = AcademicMetrics.overall_quality_score(final_text)
+                    # 结构健壮性保护
+                    orig_scores = (original_eval or {}).get('scores', {})
+                    opt_scores = (optimized_eval or {}).get('scores', {})
                     comparison = AcademicMetrics.compare_improvements(text, final_text)
-                    
                     advanced_metrics = {
-                        'original_overall_score': round(original_eval['overall_score'], 4),
-                        'optimized_overall_score': round(optimized_eval['overall_score'], 4),
+                        'original_overall_score': float((original_eval or {}).get('overall_score', 0.0)),
+                        'optimized_overall_score': float((optimized_eval or {}).get('overall_score', 0.0)),
                         'academic_formality_improvement': round(
-                            optimized_eval['scores']['academic_formality'] - original_eval['scores']['academic_formality'], 4),
+                            float(opt_scores.get('academic_formality', 0.0)) - float(
+                                orig_scores.get('academic_formality', 0.0)), 4),
                         'citation_completeness_improvement': round(
-                            optimized_eval['scores']['citation_completeness'] - original_eval['scores']['citation_completeness'], 4),
+                            float(opt_scores.get('citation_completeness', 0.0)) - float(
+                                orig_scores.get('citation_completeness', 0.0)), 4),
                         'novelty_improvement': round(
-                            optimized_eval['scores']['novelty'] - original_eval['scores']['novelty'], 4),
-                        'language_fluency_improvement': round(
-                            optimized_eval['scores']['language_fluency'] - original_eval['scores']['language_fluency'], 4),
-                        'sentence_balance_improvement': round(
-                            optimized_eval['scores']['sentence_balance'] - original_eval['scores']['sentence_balance'], 4),
+                            float(opt_scores.get('novelty', 0.0)) - float(orig_scores.get('novelty', 0.0)), 4),
+                        'language_fluency_improvement': round(float(opt_scores.get('language_fluency', 0.0)) - float(
+                            orig_scores.get('language_fluency', 0.0)), 4),
+                        'sentence_balance_improvement': round(float(opt_scores.get('sentence_balance', 0.0)) - float(
+                            orig_scores.get('sentence_balance', 0.0)), 4),
                         'argumentation_improvement': round(
-                            optimized_eval['scores']['argumentation'] - original_eval['scores']['argumentation'], 4),
+                            float(opt_scores.get('argumentation', 0.0)) - float(orig_scores.get('argumentation', 0.0)),
+                            4),
                         'expression_diversity_improvement': round(
-                            optimized_eval['scores']['expression_diversity'] - original_eval['scores']['expression_diversity'], 4),
+                            float(opt_scores.get('expression_diversity', 0.0)) - float(
+                                orig_scores.get('expression_diversity', 0.0)), 4),
                         'structure_completeness_improvement': round(
-                            optimized_eval['scores']['structure_completeness'] - original_eval['scores']['structure_completeness'], 4),
-                        'tense_consistency_improvement': round(
-                            optimized_eval['scores']['tense_consistency'] - original_eval['scores']['tense_consistency'], 4),
+                            float(opt_scores.get('structure_completeness', 0.0)) - float(
+                                orig_scores.get('structure_completeness', 0.0)), 4),
+                        'tense_consistency_improvement': round(float(opt_scores.get('tense_consistency', 0.0)) - float(
+                            orig_scores.get('tense_consistency', 0.0)), 4),
                     }
                 except Exception as e:
                     print(f"⚠️ 计算高级指标失败: {e}")
-            
+
             results.append({
                 "id": idx,
                 "len_gain": round(len_gain, 3),
@@ -567,20 +707,20 @@ class DualAgentAcademicSystem:
         # aggregate
         if results:
             avg = {
-                "len_gain_avg": round(sum(r["len_gain"] for r in results)/len(results), 3),
-                "ttr_gain_avg": round(sum(r["ttr_gain"] for r in results)/len(results), 3),
-                "repetition_delta_avg": round(sum(r["repetition_delta"] for r in results)/len(results), 3),
-                "readability_gain_avg": round(sum(r["readability_gain"] for r in results)/len(results), 3),
-                "coherence_gain_avg": round(sum(r["coherence_gain"] for r in results)/len(results), 3),
-                "sent_var_delta_avg": round(sum(r["sent_var_delta"] for r in results)/len(results), 3),
-                "bigram_rep_delta_avg": round(sum(r["bigram_rep_delta"] for r in results)/len(results), 3),
-                "quality_avg": round(sum(r.get("scores", {}).get("quality", 0) for r in results)/len(results), 3),
-                "rigor_avg": round(sum(r.get("scores", {}).get("rigor", 0) for r in results)/len(results), 3),
-                "logic_avg": round(sum(r.get("scores", {}).get("logic", 0) for r in results)/len(results), 3),
-                "novelty_avg": round(sum(r.get("scores", {}).get("novelty", 0) for r in results)/len(results), 3),
+                "len_gain_avg": round(sum(r["len_gain"] for r in results) / len(results), 3),
+                "ttr_gain_avg": round(sum(r["ttr_gain"] for r in results) / len(results), 3),
+                "repetition_delta_avg": round(sum(r["repetition_delta"] for r in results) / len(results), 3),
+                "readability_gain_avg": round(sum(r["readability_gain"] for r in results) / len(results), 3),
+                "coherence_gain_avg": round(sum(r["coherence_gain"] for r in results) / len(results), 3),
+                "sent_var_delta_avg": round(sum(r["sent_var_delta"] for r in results) / len(results), 3),
+                "bigram_rep_delta_avg": round(sum(r["bigram_rep_delta"] for r in results) / len(results), 3),
+                "quality_avg": round(sum(r.get("scores", {}).get("quality", 0) for r in results) / len(results), 3),
+                "rigor_avg": round(sum(r.get("scores", {}).get("rigor", 0) for r in results) / len(results), 3),
+                "logic_avg": round(sum(r.get("scores", {}).get("logic", 0) for r in results) / len(results), 3),
+                "novelty_avg": round(sum(r.get("scores", {}).get("novelty", 0) for r in results) / len(results), 3),
                 "n": len(results)
             }
-            
+
             # 添加高级指标平均值
             if results[0].get("advanced_metrics"):
                 adv_avg = {}
@@ -589,20 +729,22 @@ class DualAgentAcademicSystem:
                         sum(r.get("advanced_metrics", {}).get(metric, 0) for r in results) / len(results), 4)
                 avg.update(adv_avg)
         else:
-            avg = {"len_gain_avg":0,"ttr_gain_avg":0,"repetition_delta_avg":0,"readability_gain_avg":0,"coherence_gain_avg":0,"sent_var_delta_avg":0,"bigram_rep_delta_avg":0,"quality_avg":0,"rigor_avg":0,"logic_avg":0,"novelty_avg":0,"n":0}
+            avg = {"len_gain_avg": 0, "ttr_gain_avg": 0, "repetition_delta_avg": 0, "readability_gain_avg": 0,
+                   "coherence_gain_avg": 0, "sent_var_delta_avg": 0, "bigram_rep_delta_avg": 0, "quality_avg": 0,
+                   "rigor_avg": 0, "logic_avg": 0, "novelty_avg": 0, "n": 0}
         report = {"summary": avg, "cases": results}
         print("📈 评估汇总:", json.dumps(report["summary"], ensure_ascii=False))
         return report
 
-    def prepare_distillation_pairs(self, jsonl_path: Path, out_path: Path) -> Path:
+    def prepare_distillation_pairs(self, jsonl_path: "Path", out_path: "Path") -> "Path":
         pairs = []
         with open(jsonl_path, 'r', encoding='utf-8') as f:
             for ln in f:
                 if not ln.strip():
                     continue
                 obj = json.loads(ln)
-                instr = f"优化以下学术段落，满足需求: {', '.join(obj.get('requirements', []))}\n原文: {obj.get('input','')}"
-                target = obj.get('teacher_signal', obj.get('final',''))
+                instr = f"优化以下学术段落，满足需求: {', '.join(obj.get('requirements', []))}\n原文: {obj.get('input', '')}"
+                target = obj.get('teacher_signal', obj.get('final', ''))
                 scores = obj.get('scores', {})
                 pairs.append({"instruction": instr, "output": target, "scores": scores})
         with open(out_path, 'w', encoding='utf-8') as w:
@@ -612,9 +754,65 @@ class DualAgentAcademicSystem:
         return out_path
 
 
-dual_agent_system = DualAgentAcademicSystem(llm, TOOLS, vectorstore)
-print("🤖 双Agent系统初始化完成")
+# Helper to build a hybrid system where Agent A uses a local HF Qwen student model
+# and Agent B uses the existing remote teacher llm.
+try:
+    from hf_student_llm import HFChatLLM as _HFStudentLLM
+except Exception:
+    _HFStudentLLM = None
 
+
+def build_hybrid_dual_agent_system(base_model: str | None = None,
+                                   lora_dir: str | None = None,
+                                   max_new_tokens: int | None = None,
+                                   device: str | None = None,
+                                   torch_dtype: str | None = None,
+                                   device_map: str | None = None) -> DualAgentAcademicSystem:
+    """Create a DualAgentAcademicSystem with local HF student model for Agent A and remote LLM for Agent B.
+    Added detection of FORCE_STUDENT_STUB=1 测试/CI模式.
+    """
+    if _HFStudentLLM is None:
+        print("⚠️ HF student LLM not available (transformers/peft missing or import error); using single LLM mode.")
+        return DualAgentAcademicSystem(llm, TOOLS, vectorstore)
+
+    # Resolve overrides with env fallback
+    env_base = os.getenv("STUDENT_BASE_MODEL", "Qwen/Qwen1.5-1.8B-Chat")
+    env_lora = os.getenv("STUDENT_LORA_DIR") or ""
+    env_max_new = int(os.getenv("STUDENT_MAX_NEW_TOKENS", "512"))
+
+    base_model = base_model or env_base
+    lora_dir = lora_dir if lora_dir is not None else env_lora
+    max_new = max_new_tokens or env_max_new
+
+    if lora_dir and not Path(lora_dir).exists():
+        print(f"⚠️ STUDENT_LORA_DIR not found ({lora_dir}); will load base model without LoRA.")
+        lora_dir = ""  # 继续但不使用LoRA
+
+    stub_mode = os.getenv("FORCE_STUDENT_STUB") == "1"
+    if stub_mode:
+        print("🧪 FORCE_STUDENT_STUB=1 启用：学生模型使用轻量占位生成，不下载真实权重。")
+
+    try:
+        student_llm = _HFStudentLLM(base_model=base_model,
+                                    lora_dir=lora_dir,
+                                    max_new_tokens=max_new,
+                                    device=device,
+                                    torch_dtype=torch_dtype,
+                                    device_map=device_map)
+        print(f"🤖 Hybrid mode engaged | Agent A: {getattr(student_llm,'model_name', base_model)} (LoRA={'ON' if lora_dir else 'OFF'} stub={stub_mode}) | Agent B: {getattr(llm, 'model_name', 'remote-llm')}")
+        return DualAgentAcademicSystem(llm, TOOLS, vectorstore, agent_a_llm=student_llm, agent_b_llm=llm)
+    except Exception as e:
+        print(f"⚠️ Failed to init student model '{base_model}': {e}; falling back to single LLM mode.")
+        return DualAgentAcademicSystem(llm, TOOLS, vectorstore)
+
+
+# keep default global system for backward compatibility
+dual_agent_system = build_hybrid_dual_agent_system()
+print("🧠 双Agent系统初始化完成 (Agent A 本地学生模型, Agent B 远程教师模型, 若学生未配置则回退单模型模式)")
+if os.getenv("FORCE_STUDENT_STUB") == "1":
+    print("🧪 当前运行于学生模型 STUB 模式：所有学生输出为占位生成，仅用于快速测试。")
+
+# 修复：补全字符串引号
 ENABLE_INTERACTIVE = os.getenv("ENABLE_INTERACTIVE", "0") == "1"
 from html import escape as _html_escape
 
@@ -622,6 +820,7 @@ from html import escape as _html_escape
 def generate_html_report(title: str, final_text: str, log: List[Dict], summary: Optional[Dict] = None) -> str:
     if 'round-box' in str(log[:1]):
         return ''
+
     def style():
         return '''<style>
 body{font-family:Segoe UI,Arial,sans-serif;max-width:1200px;margin:32px auto;line-height:1.5}
@@ -649,22 +848,24 @@ details summary{cursor:pointer;font-weight:bold;padding:8px;background:#f0f0f0;m
 .warning{background:#fff3cd;border-left:4px solid #ffc107;padding:10px;margin:10px 0}
 .success{background:#d4edda;border-left:4px solid #28a745;padding:10px;margin:10px 0}
 </style>'''
+
     def render_scores(scores: Dict[str, float]) -> str:
         if not scores:
             return '<span class="meta">无评分</span>'
-        return ' '.join(f'<span class="score-badge">{k}:{v:.1f}</span>' for k,v in scores.items() if isinstance(v,(int,float)))
-    
+        return ' '.join(
+            f'<span class="score-badge">{k}:{v:.1f}</span>' for k, v in scores.items() if isinstance(v, (int, float)))
+
     def render_metric_cards(metrics: Dict) -> str:
         """生成指标卡片网格"""
         if not metrics:
             return ''
-        
+
         html = '<div class="metric-grid">'
         for key, value in metrics.items():
             if key.endswith('_avg') or key.endswith('_improvement'):
                 # 提取易读的标签名
                 label = key.replace('_avg', '').replace('_improvement', '').replace('_', ' ').title()
-                
+
                 # 确定颜色和方向
                 if isinstance(value, (int, float)):
                     if value > 0:
@@ -676,7 +877,7 @@ details summary{cursor:pointer;font-weight:bold;padding:8px;background:#f0f0f0;m
                     else:
                         color_class = ''
                         symbol = '='
-                    
+
                     html += f'''
                     <div class="metric-card">
                         <h4>{label}</h4>
@@ -686,21 +887,21 @@ details summary{cursor:pointer;font-weight:bold;padding:8px;background:#f0f0f0;m
                     '''
         html += '</div>'
         return html
-    
+
     def render_advanced_metrics(advanced_metrics: Dict) -> str:
         """渲染高级学术指标"""
         if not advanced_metrics:
             return ''
-        
+
         html = '<h3>高级学术指标</h3>'
         html += '<div class="metric-grid">'
-        
+
         # 原始和优化后的总体评分
         if 'original_overall_score' in advanced_metrics and 'optimized_overall_score' in advanced_metrics:
             orig = advanced_metrics['original_overall_score']
             opt = advanced_metrics['optimized_overall_score']
             improvement = opt - orig
-            
+
             html += f'''
             <div class="metric-card">
                 <h4>总体质量评分</h4>
@@ -713,16 +914,16 @@ details summary{cursor:pointer;font-weight:bold;padding:8px;background:#f0f0f0;m
                 </div>
             </div>
             '''
-        
+
         # 各维度改进
         improvements = {k: v for k, v in advanced_metrics.items() if '_improvement' in k and k != 'overall_improvement'}
         for metric, improvement in sorted(improvements.items())[:6]:  # 显示前6个
             label = metric.replace('_improvement', '').replace('_', ' ').title()
             color_class = 'improvement-positive' if improvement > 0 else 'improvement-negative'
-            
+
             # 创建进度条
             progress = max(0, min((improvement + 0.5) / 1.0 * 100, 100))  # 标准化到0-100%
-            
+
             html += f'''
             <div class="metric-card">
                 <h4>{label}</h4>
@@ -732,10 +933,10 @@ details summary{cursor:pointer;font-weight:bold;padding:8px;background:#f0f0f0;m
                 <div class="{color_class}">{improvement:+.4f}</div>
             </div>
             '''
-        
+
         html += '</div>'
         return html
-    
+
     def color_diff(diff_text: str) -> str:
         lines = []
         for ln in diff_text.splitlines():
@@ -746,14 +947,14 @@ details summary{cursor:pointer;font-weight:bold;padding:8px;background:#f0f0f0;m
             else:
                 lines.append(f'<div>{_html_escape(ln)}</div>')
         return '\n'.join(lines)
-    
+
     parts = [f'<html><head><meta charset="utf-8"><title>{_html_escape(title)}</title>{style()}</head><body>']
     parts.append(f'<h1>📊 {_html_escape(title)}</h1>')
     parts.append(f'<div class="meta">生成时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</div>')
-    
+
     if summary:
         parts.append('<h2>📈 指标汇总</h2>')
-        
+
         # 显示基础指标表格
         parts.append('<h3>基础文本指标</h3>')
         parts.append('<table><tr>')
@@ -772,7 +973,7 @@ details summary{cursor:pointer;font-weight:bold;padding:8px;background:#f0f0f0;m
             color = 'improvement-positive' if val > 0 else 'improvement-negative' if val < 0 else ''
             parts.append(f'<td class="{color}">{val:.4f}</td>')
         parts.append('</tr></table>')
-        
+
         # 显示Agent评分
         parts.append('<h3>Agent B 评分汇总</h3>')
         parts.append('<table><tr>')
@@ -789,24 +990,25 @@ details summary{cursor:pointer;font-weight:bold;padding:8px;background:#f0f0f0;m
             val = summary.get(key, 0)
             parts.append(f'<td><span class="metric-value">{val:.2f}/10</span></td>')
         parts.append('</tr></table>')
-        
+
         # 显示高级指标卡片
         adv_metrics = {k: v for k, v in summary.items() if 'improvement' in k}
         if adv_metrics:
             parts.append(render_metric_cards(adv_metrics))
-    
+
     parts.append('<h2>📝 最终优化文本</h2><pre>' + _html_escape(final_text) + '</pre>')
     parts.append('<h2>📋 轮次详细日志</h2>')
     for entry in log[1:]:
         parts.append('<div class="round-box">')
         parts.append(f'<h3>Round {entry.get("round")}</h3>')
         parts.append(f'<div class="meta">时间: {entry.get("timestamp")}</div>')
-        parts.append('<h4>✏️ 优化文本</h4><pre>' + _html_escape(entry.get('optimized_text','')) + '</pre>')
-        parts.append('<h4>📝 Agent B 反馈</h4><pre>' + _html_escape(entry.get('agent_b_feedback','')) + '</pre>')
-        parts.append('<h4>⭐ 评分</h4>' + render_scores(entry.get('scores',{})))
-        parts.append('<details><summary>🔍 文本差异 (Diff)</summary>' + color_diff(entry.get('diff','')) + '</details>')
-        if entry.get('tool_observations') and entry.get('tool_observations') not in ('(无)','(工具已禁用)'):
-            parts.append('<details><summary>🔧 工具调用观察</summary><pre>' + _html_escape(entry.get('tool_observations','')) + '</pre></details>')
+        parts.append('<h4>✏️ 优化文本</h4><pre>' + _html_escape(entry.get('optimized_text', '')) + '</pre>')
+        parts.append('<h4>📝 Agent B 反馈</h4><pre>' + _html_escape(entry.get('agent_b_feedback', '')) + '</pre>')
+        parts.append('<h4>⭐ 评分</h4>' + render_scores(entry.get('scores', {})))
+        parts.append('<details><summary>🔍 文本差异 (Diff)</summary>' + color_diff(entry.get('diff', '')) + '</details>')
+        if entry.get('tool_observations') and entry.get('tool_observations') not in ('(无)', '(工具已禁用)'):
+            parts.append('<details><summary>🔧 工具调用观察</summary><pre>' + _html_escape(
+                entry.get('tool_observations', '')) + '</pre></details>')
         parts.append('</div>')
     parts.append('</body></html>')
     return '\n'.join(parts)
@@ -843,7 +1045,7 @@ def _split_long_text(text: str, chunk_size: int, overlap: int) -> List[str]:
     buf = ''
     for i in range(0, len(sentences), 2):
         seg = sentences[i]
-        delim = sentences[i+1] if i+1 < len(sentences) else ''
+        delim = sentences[i + 1] if i + 1 < len(sentences) else ''
         piece = seg + delim
         if len(buf) + len(piece) <= chunk_size:
             buf += piece
@@ -868,7 +1070,9 @@ def _split_long_text(text: str, chunk_size: int, overlap: int) -> List[str]:
         combined = with_overlap
     return combined
 
-def optimize_text_file(system: DualAgentAcademicSystem, file_path: str, requirements: List[str], rounds: int, chunk_size: int, overlap: int, max_chunks: int = 0) -> Tuple[str, Dict]:
+
+def optimize_text_file(system: DualAgentAcademicSystem, file_path: str, requirements: List[str], rounds: int,
+                       chunk_size: int, overlap: int, max_chunks: int = 0) -> Tuple[str, Dict]:
     """Optimize a long text file by chunking and running multi-round collaborate per chunk.
     Returns (final_combined_text, aggregated_report_dict)."""
     p = Path(file_path)
@@ -881,7 +1085,7 @@ def optimize_text_file(system: DualAgentAcademicSystem, file_path: str, requirem
     segment_logs = []
     optimized_segments = []
     for idx, chunk in enumerate(chunks):
-        print(f'🧩 处理分段 {idx+1}/{len(chunks)} (长度={len(chunk)})')
+        print(f'🧩 处理分段 {idx + 1}/{len(chunks)} (长度={len(chunk)})')
         final_seg, log = system.collaborate(chunk, requirements, rounds=rounds)
         optimized_segments.append(final_seg)
         segment_logs.append({
@@ -906,7 +1110,8 @@ def optimize_text_file(system: DualAgentAcademicSystem, file_path: str, requirem
 
 def build_arg_parser():
     p = argparse.ArgumentParser(description='Dual-agent academic optimizer (adversarial enhanced)')
-    p.add_argument('command', nargs='?', default='demo', choices=['demo','synthesize','eval','distill'], help='运行模式')
+    p.add_argument('command', nargs='?', default='demo', choices=['demo', 'synthesize', 'eval', 'distill'],
+                   help='运行模式')
     p.add_argument('--rounds', type=int, default=2, help='协作轮次')
     p.add_argument('--text', type=str, help='自定义初始文本 (demo)')
     p.add_argument('--text-file', type=str, help='从文件读取初始文本 (长文本优化)')
@@ -916,15 +1121,23 @@ def build_arg_parser():
     p.add_argument('--requirements', type=str, help='逗号/分号分隔需求列表')
     p.add_argument('--seeds-file', type=str, help='种子文本文件路径 (synthesize)')
     p.add_argument('--out', type=str, help='输出文件路径')
-    p.add_argument('--lang', type=str, choices=['zh','en'], default='zh', help='语言')
+    p.add_argument('--lang', type=str, choices=['zh', 'en'], default='zh', help='语言')
     p.add_argument('--no-tools', action='store_true', help='禁用工具调用')
     p.add_argument('--no-memory', action='store_true', help='禁用向量记忆')
     p.add_argument('--report', type=str, help='JSON 报告输出路径')
     p.add_argument('--html-report', type=str, help='HTML 报告输出路径')
     p.add_argument('--distill-src', type=str, help='蒸馏源 JSONL (distill)')
     p.add_argument('--distill-out', type=str, help='蒸馏输出 JSONL')
-    # 新增：可选文本输出文件，用于将最终优化的学术表达写回同类型文本文件
     p.add_argument('--out-text-file', type=str, help='将最终优化文本写入该路径 (例如 optimized_paper.txt)')
+    # HYBRID / Student model parameters
+    p.add_argument('--hybrid', action='store_true', help='启用混合模式: Agent A 使用本地学生模型, Agent B 使用远程教师模型')
+    p.add_argument('--student-base-model', type=str, help='学生模型 HF 名称 (覆盖 STUDENT_BASE_MODEL)')
+    p.add_argument('--student-lora-dir', type=str, help='LoRA 适配器目录 (覆盖 STUDENT_LORA_DIR)')
+    p.add_argument('--student-max-new-tokens', type=int, help='学生模型生成最大 new tokens (覆盖 STUDENT_MAX_NEW_TOKENS)')
+    p.add_argument('--student-device', type=str, help='学生模型加载设备 (cpu/cuda 自动推断可省略)')
+    p.add_argument('--student-dtype', type=str, help='学生模型 torch dtype, 例如 float16/bfloat16')
+    p.add_argument('--student-device-map', type=str, help='HF device_map (auto/balanced 等)')
+    p.add_argument('--student-save-config', type=str, help='保存当前学生模型配置到该 JSON 文件 (例如 data/student_last_loaded.json)')
     return p
 
 
@@ -933,7 +1146,44 @@ if __name__ == '__main__':
     parser = build_arg_parser()
     args = parser.parse_args()
     rounds = max(1, args.rounds)
-    dual_agent_system = DualAgentAcademicSystem(llm, TOOLS, vectorstore, enable_tools=not args.no_tools, enable_memory=not args.no_memory)
+
+    # 初始化系统: 根据 --hybrid 决定是否启用学生模型
+    if args.hybrid:
+        dual_agent_system = build_hybrid_dual_agent_system(
+            base_model=args.student_base_model,
+            lora_dir=args.student_lora_dir,
+            max_new_tokens=args.student_max_new_tokens,
+            device=args.student_device,
+            torch_dtype=args.student_dtype,
+            device_map=args.student_device_map,
+        )
+        # 保存配置（可选）
+        if args.student_save_config:
+            cfg_path = Path(args.student_save_config)
+            cfg_path.parent.mkdir(parents=True, exist_ok=True)
+            config_obj = {
+                'base_model': args.student_base_model or os.getenv('STUDENT_BASE_MODEL', 'Qwen/Qwen1.5-1.8B-Chat'),
+                'lora_dir': args.student_lora_dir or os.getenv('STUDENT_LORA_DIR') or '',
+                'max_new_tokens': args.student_max_new_tokens or int(os.getenv('STUDENT_MAX_NEW_TOKENS', '512')),
+                'device': args.student_device,
+                'torch_dtype': args.student_dtype,
+                'device_map': args.student_device_map,
+                'saved_at': datetime.now().isoformat(),
+            }
+            try:
+                cfg_path.write_text(json.dumps(config_obj, ensure_ascii=False, indent=2), encoding='utf-8')
+                print(f'💾 已保存学生模型配置: {cfg_path}')
+            except Exception as e:
+                print(f'⚠️ 保存学生模型配置失败: {e}')
+    else:
+        dual_agent_system = DualAgentAcademicSystem(
+            llm,
+            TOOLS,
+            vectorstore,
+            enable_tools=not args.no_tools,
+            enable_memory=not args.no_memory,
+        )
+        print('🔁 单模型模式: Agent A / B 均使用同一远程或回退 LLM')
 
     def _maybe_write_report(data: Dict, path: Optional[str]):
         if path:
@@ -944,7 +1194,9 @@ if __name__ == '__main__':
             except Exception as e:
                 print(f'⚠️ JSON 报告写入失败: {e}')
 
-    def _maybe_write_html(final_text: str, log: List[Dict], path: Optional[str], summary: Optional[Dict]=None, title: str='多轮优化报告'):
+
+    def _maybe_write_html(final_text: str, log: List[Dict], path: Optional[str], summary: Optional[Dict] = None,
+                          title: str = '多轮优化报告'):
         if path:
             try:
                 html = generate_html_report(title, final_text, log, summary=summary)
@@ -953,6 +1205,7 @@ if __name__ == '__main__':
                 print(f'📄 HTML 报告已写入: {path}')
             except Exception as e:
                 print(f'⚠️ HTML 报告写入失败: {e}')
+
 
     # 新增：将最终优化文本写入同类型文本文件的辅助函数
     def _maybe_write_text(final_text: str, path: Optional[str]):
@@ -965,17 +1218,22 @@ if __name__ == '__main__':
             except Exception as e:
                 print(f'⚠️ 文本输出写入失败: {e}')
 
+
     if ENABLE_INTERACTIVE:
         print('🚀 交互模式开启')
         if args.text_file:
             # Long file path provided
             reqs = parse_requirements(args.requirements, ['学术表达提升'])
-            final_text, aggregated = optimize_text_file(dual_agent_system, args.text_file, reqs, rounds=rounds, chunk_size=args.chunk_size, overlap=args.chunk_overlap, max_chunks=args.max_chunks)
+            final_text, aggregated = optimize_text_file(dual_agent_system, args.text_file, reqs, rounds=rounds,
+                                                        chunk_size=args.chunk_size, overlap=args.chunk_overlap,
+                                                        max_chunks=args.max_chunks)
             _maybe_write_report({'final': final_text, 'aggregated': aggregated}, args.report)
             _maybe_write_html(final_text, aggregated.get('segments', []), args.html_report, title='交互模式长文本报告')
             _maybe_write_text(final_text, args.out_text_file)
         else:
-            final_text, log = dual_agent_system.collaborate(args.text or '交互模式初稿', parse_requirements(args.requirements, ['学术表达提升']), rounds=rounds)
+            final_text, log = dual_agent_system.collaborate(args.text or '交互模式初稿',
+                                                            parse_requirements(args.requirements, ['学术表达提升']),
+                                                            rounds=rounds)
             _maybe_write_report({'final': final_text, 'log': log}, args.report)
             _maybe_write_html(final_text, log, args.html_report, title='交互模式报告')
             _maybe_write_text(final_text, args.out_text_file)
@@ -983,9 +1241,14 @@ if __name__ == '__main__':
         if args.command == 'demo':
             print('🚀 Demo 演示模式')
             if args.text_file:
-                reqs = parse_requirements(args.requirements, ['学术表达提升','逻辑结构优化'] if args.lang == 'zh' else ['academic polish','logical coherence'])
-                final_text, aggregated = optimize_text_file(dual_agent_system, args.text_file, reqs, rounds=rounds, chunk_size=args.chunk_size, overlap=args.chunk_overlap, max_chunks=args.max_chunks)
-                print('\n📌 Long file optimized final text (truncated preview):\n', final_text[:800] + ('...' if len(final_text) > 800 else ''))
+                reqs = parse_requirements(args.requirements,
+                                          ['学术表达提升', '逻辑结构优化'] if args.lang == 'zh' else ['academic polish',
+                                                                                                      'logical coherence'])
+                final_text, aggregated = optimize_text_file(dual_agent_system, args.text_file, reqs, rounds=rounds,
+                                                            chunk_size=args.chunk_size, overlap=args.chunk_overlap,
+                                                            max_chunks=args.max_chunks)
+                print('\n📌 Long file optimized final text (truncated preview):\n',
+                      final_text[:800] + ('...' if len(final_text) > 800 else ''))
                 _maybe_write_report({'final': final_text, 'aggregated': aggregated}, args.report)
                 _maybe_write_html(final_text, aggregated.get('segments', []), args.html_report, title='长文本优化报告')
                 _maybe_write_text(final_text, args.out_text_file)
@@ -994,7 +1257,9 @@ if __name__ == '__main__':
                     'This is a preliminary draft about multi-agent collaboration in academic writing.' if args.lang == 'en' else '这是一段关于多智能体协作进行学术写作优化的初稿。'
                 )
                 sample_text = args.text or base_default
-                reqs = parse_requirements(args.requirements, ['学术表达提升','逻辑结构优化'] if args.lang == 'zh' else ['academic polish','logical coherence'])
+                reqs = parse_requirements(args.requirements,
+                                          ['学术表达提升', '逻辑结构优化'] if args.lang == 'zh' else ['academic polish',
+                                                                                                      'logical coherence'])
                 final_text, log = dual_agent_system.collaborate(sample_text, reqs, rounds=rounds)
                 print('\n📌 Final optimized text:\n', final_text)
                 _maybe_write_report({'final': final_text, 'log': log}, args.report)
@@ -1007,7 +1272,7 @@ if __name__ == '__main__':
                 '我们提出一个简单的管线，但方法部分缺乏清晰的因果论证。',
                 '实验结果显示一定改进，但统计显著性需要进一步说明。',
             ]
-            reqs = parse_requirements(args.requirements, ['学术表达提升','结构清晰','可读性增强'])
+            reqs = parse_requirements(args.requirements, ['学术表达提升', '结构清晰', '可读性增强'])
             out_path = Path(args.out) if args.out else None
             path = dual_agent_system.synthesize_dataset(seeds, reqs, rounds=rounds, out_path=out_path)
             _maybe_write_report({'dataset_path': str(path)}, args.report)
@@ -1016,12 +1281,15 @@ if __name__ == '__main__':
         elif args.command == 'eval':
             print('🧮 评估模式')
             tests = [
-                ('本文提出一种方法，但存在一些问题，需要更严谨的叙述。', parse_requirements(args.requirements, ['严谨性','逻辑连贯'])),
-                ('我们的实验结果较为有限，缺少消融实验。', parse_requirements(args.requirements, ['补充实验建议','学术化表达']))
+                ('本文提出一种方法，但存在一些问题，需要更严谨的叙述。',
+                 parse_requirements(args.requirements, ['严谨性', '逻辑连贯'])),
+                ('我们的实验结果较为有限，缺少消融实验。',
+                 parse_requirements(args.requirements, ['补充实验建议', '学术化表达']))
             ]
             report = dual_agent_system.evaluate(tests, rounds=rounds)
             _maybe_write_report(report, args.report)
-            _maybe_write_html('N/A (Eval 多案例)', report.get('cases', []), args.html_report, summary=report.get('summary'), title='评估指标汇总报告')
+            _maybe_write_html('N/A (Eval 多案例)', report.get('cases', []), args.html_report,
+                              summary=report.get('summary'), title='评估指标汇总报告')
         elif args.command == 'distill':
             print('🧪 蒸馏数据生成模式')
             src = Path(args.distill_src) if args.distill_src else Path(args.out or 'data/latest_synth.jsonl')
