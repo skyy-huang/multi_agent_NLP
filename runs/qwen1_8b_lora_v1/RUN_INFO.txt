@@ -1,0 +1,10 @@
+Model: D:/Projects/NLP/models/Qwen1.5-1.8B-Chat
+LoRA r=8, alpha=16, dropout=0.05
+Target modules=['q_proj', 'k_proj', 'v_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj']
+QLoRA=False
+Rows=4
+Epochs=1
+Batch=2
+GradAccum=8
+MaxLen=1024
+Seed=42

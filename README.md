@@ -1,499 +1,477 @@
-# 多智能体学术写作优化系统 使用手册
+# 多智能体学术写作优化系统（Academic Multi-Agent WritingOptimizer）
 
-> 主题：学术表达优化助手。系统包含两个智能体：Agent A 负责修改优化草稿，Agent B 负责严格审查并给出结构化评分与建议，二者多轮往复后输出最终结果；同时支持数据合成、蒸馏与 LoRA 微调原型。
+本项目实现了一个面向学术写作的多智能体闭环系统：
+
+- Agent A（学生 / Optimizer）：在原始草稿基础上进行学术化改写和结构优化，可使用**本地 Qwen 学生模型 + LoRA**。
+- Agent B（教师 / Reviewer）：基于高质量 LLM（如 DeepSeek）给出评分和改进建议，也可在无 API 的情况下退化为 DummyLLM。
+- 多轮交互后生成：优化后的文本 + 每轮改写与评分日志 + HTML / JSON 报告，可用于**论文打磨、教学展示、数据合成与蒸馏、小模型增强**等。
 
 ---
 ## 目录
-1. 项目简介
-2. 核心功能与特性
-3. **🌟 Web图形化界面** (新增)
-4. 代码结构说明
-5. 环境准备与安装
-6. 配置说明（.env / 环境变量）
-7. 快速上手：常用命令示例
-8. CLI 参数与工作流详情
-9. Jupyter Notebook 与脚本的一致性说明
-10. 典型使用场景与优化思路
-11. 数据格式规范（合成 / 蒸馏 / 报告）
-12. 评估指标含义
-13. 性能与调优建议
-14. 常见问题 FAQ
-15. 后续扩展建议
+1. 项目概览与目标  
+2. 核心特性速览  
+3. 代码结构与模块职责  
+4. 整体流程概览  
+5. 环境与依赖（Python 3.11 + GPU + 本地模型）  
+6. 从零安装与启动  
+7. 本地 Qwen + LoRA 学生模型  
+8. CLI 模式：demo / synthesize / distill / eval  
+9. 多智能体协作机制（Agent A / Agent B）  
+10. 工具调用与回退策略（Search / Python REPL / 文件 IO）  
+11. 向量记忆与检索（FAISS / 简化回退）  
+12. 学术质量评估指标体系  
+13. 数据管线：seeds → synth_*.jsonl → distill_pairs.jsonl → LoRA  
+14. Web 界面  
+15. 团队协作与 runs/ 使用说明  
+16. 测试与质量保障（可选）  
 
 ---
-## 1. 项目简介
-本项目实现了一个针对“学术风格文本优化”的多智能体闭环系统：
-- **Agent A（Optimizer）**：根据用户需求与历史记忆对文本进行多轮学术化改写；
-- **Agent B（Reviewer）**：对 Agent A 的输出进行结构化评估与打分，指出剩余问题并给出下一轮改进建议；
-- 通过多轮 A/B 协作，逐步收敛到质量更高的版本，并记录完整的协作日志、评分、差异（Diff）、工具调用观测等信息。
+## 1. 项目概览与目标
 
-系统还提供：
-- **数据合成（synthesize）**：从种子文本出发，批量生成多轮协作数据（含 teacher signal 与评分）；
-- **蒸馏数据构造（distill）**：从合成数据中抽取 `instruction/output` 训练对；
-- **LoRA / QLoRA 微调脚本（lora_distill.py）**：将蒸馏对用于小模型微调；
-- **评估模式（eval）**：对多条文本运行多轮优化并计算一系列轻量指标与 Agent B 评分均值；
-- **HTML / JSON 报告**：可视化展示每一轮的文本、Diff、评分与工具调用信息。
+本项目提供一个可本地化部署的**学术写作多智能体系统**：
 
-该项目适合用于：
-- 学术写作场景原型验证；
-- prompt 与多智能体协作策略实验；
-- 生成蒸馏数据并微调较小的中文/英文语言模型。
+- Agent A：负责在给定需求下对学术文本进行重写、结构调整、语言学术化处理；
+- Agent B：负责从多个维度评价 Agent A 的输出，并提出进一步改进建议；
+- 支持长文本自动分段、多轮迭代优化、可视化报告生成；
+- 支持基于该流程自动合成数据、构建蒸馏样本，并对本地 Qwen 学生模型进行 LoRA/QLoRA 微调；
+- 在缺少外部服务时，自动退化为 DummyLLM、简化向量检索等，占位但不断流，适合教学演示与离线环境。
 
 ---
-## 2. 核心功能与特性
-- **多轮双 Agent 协作**：`--rounds` 控制轮数，每轮包含一次 Agent A 改写与一次 Agent B 评审；
-- **ReAct 风格工具调用**：在满足特定条件时触发网络搜索（SerpAPI）、Python REPL、文件读写等工具；
-- **向量记忆 / 召回**：优先使用 FAISS + Embeddings（若依赖或 Key 缺失则回退到简单字符串相似度检索）；
-- **健壮的回退链**：LLM / Embeddings / VectorStore / Search 多层回退，保证即使没有 API Key 也能跑通流程（使用 DummyLLM 占位输出）；
-- **长文本分段优化**：支持从文件读取长文，按句子智能分段并带重叠区域进行多轮优化，再将各段拼接为整体；
-- **数据合成与蒸馏链路**：从多轮协作日志生成适合指令微调的 `instruction/output` 蒸馏对；
-- **评估指标**：自动计算长度变化、词汇多样性、重复度下降、可读性、连贯性、句长方差变化、双元组重复变化等指标，并聚合均值；
-- **报告生成**：输出结构化 JSON 以及带 Diff 高亮的 HTML 报告，方便分析与展示。
+## 2. 核心特性速览
+
+- 多智能体闭环：学生模型负责改写，教师模型负责打分与反馈，多轮迭代收敛到高质量版本；
+- 学术质量评估：内置 9 维学术质量指标（规范性、证据完整性、流畅度等），可比较优化前后；
+- 本地学生模型：通过 `hf_student_llm.py` 加载本地 Qwen（推荐 Qwen1.5/Qwen2 1.8B Chat），可叠加 LoRA 适配器；
+- 数据闭环：支持从 `seeds.txt` 出发自动合成数据（synthesize）、从合成日志提炼蒸馏样本（distill）、再通过 `lora_distill.py` 进行 LoRA 微调；
+- 向量记忆：优先使用 FAISS + embeddings，缺失时退化为简单关键词相似度检索；
+- 强健回退设计：LangChain 相关依赖、SerpAPI、FAISS、OpenAI API 缺失时自动采用 stub / 占位逻辑，保证主流程可运行；
+- Web + CLI：提供命令行入口与 Flask + SocketIO Web 前端，支持实时查看进度与下载报告。
 
 ---
-## 3. 🌟 Web图形化界面 (新增)
+## 3. 代码结构与模块职责
 
-为了提供更直观、易用的操作体验，项目新增了现代化的Web图形界面，支持所有核心功能的可视化操作。
+根目录关键文件（部分）：
 
-### 🎨 界面特性
-- **现代化设计**: Bootstrap 5 + 自定义样式，响应式布局
-- **实时进度**: WebSocket实时显示优化进度和状态
-- **多模式支持**: 文本输入模式 + 文件上传模式
-- **可视化配置**: 图形化参数设置和API配置管理
-- **多格式导出**: 支持文本、HTML报告、JSON数据下载
+- `multi_agent_nlp_project.py`
+  - 项目主入口，提供 CLI 子命令：`demo` / `synthesize` / `distill` / `eval`；
+  - 完成：主 LLM（DeepSeek/OpenAI/Dummy）、工具集、向量存储、MemoryManager 初始化；
+  - 定义 `DualAgentAcademicSystem`，实现 Agent A/B 协作、长文本切分、日志与 HTML 报告生成等。
+- `hf_student_llm.py`
+  - HuggingFace + 可选 LoRA 的“学生模型”封装，类名 `HFChatLLM`；
+  - 当 `FORCE_STUDENT_STUB=1` 或缺少 torch/transformers 时，自动使用轻量 stub；
+  - 在正常模式中，可加载本地 Qwen 基座以及 `runs/` 下的 LoRA 适配器。
+- `lora_distill.py`
+  - 从蒸馏数据 JSONL 中读取样本，使用 transformers + peft 微调 LoRA/QLoRA；
+  - 对 Qwen/Qwen2 风格的模型自动设置合理 `target_modules`，并支持命令行调整 LoRA 超参。
+- `metrics.py` / `demo_metrics.py`
+  - 学术质量评价指标与演示脚本（单段/对比/可视化）。
+- `web_interface/`
+  - `app.py` / `start_web.py`：Flask + SocketIO 后端；
+  - `index.html` + `static/js/app.js` + `static/css/styles.css`：前端与交互；
+  - `uploads/`：上传文件暂存目录。
+- `data/`
+  - `seeds.txt`：合成任务的种子句子；
+  - `synth_*.jsonl`：一次 `synthesize` 运行得到的完整多轮合成/推理日志；
+  - `distill_pairs.jsonl`：由 `distill` 生成的用于 LoRA 训练的蒸馏样本。
+- `runs/`
+  - 例如 `runs/qwen1_8b_lora_v1/`：你训练得到的 LoRA 适配器与训练 checkpoint（见第 15 节）。
+- `tests/test_flow.py`
+  - 核心逻辑的单元测试：需求解析、文本切分、DummyLLM 流程回退、HTML 报告结构、蒸馏样本生成等。
+- `requirements.txt`
+  - 统一的依赖清单，涵盖核心 + Web + 微调 + 评估。
 
-### 🚀 快速启动Web界面
+---
+## 4. 整体流程概览
 
-```bash
-# 1. 进入Web界面目录
-cd web_interface
-
-# 2. 安装Web依赖
-pip install -r requirements_web.txt
-
-# 3. 启动Web服务
-python start_web.py
-
-# 4. 访问界面
-# 浏览器打开: http://localhost:5000
+```text
+seeds.txt  ──► synthesize  ──►  synth_*.jsonl  ──►  distill  ──►  distill_pairs.jsonl
+                                                 │
+                                                 ▼
+                                          lora_distill.py
+                                                 │
+                                                 ▼
+    本地 Qwen 基座模型  +  runs/<lora_run>/adapter_*  ──►  学生模型 (HFChatLLM)
+                                                 │
+                                                 ▼
+                 DualAgentAcademicSystem  (Agent A 学生 + Agent B 老师)
+                                                 │
+                                                 ▼
+                                  CLI / Web  多轮优化 + 报告输出
 ```
 
-### 📋 主要功能模块
+---
+## 5. 环境与依赖（Python 3.11 + GPU + 本地模型）
 
-#### 📝 文本优化模块
-- **文本输入**: 直接输入要优化的学术文本
-- **文件上传**: 支持长文件分段处理(.txt, .md等格式)
-- **实时监控**: 实时显示优化进度、状态和日志
-- **结果展示**: 对比视图、最终结果、轮次详情三种查看模式
-- **评分可视化**: 质量、严谨性、逻辑、新颖性等维度评分图表
+推荐环境：
 
-#### 🔬 数据合成模块
-- **种子文本输入**: 支持多行种子文本批量处理
-- **参数配置**: 可设置合成需求、轮次等参数
-- **进度跟踪**: 实时显示合成进度和状态
+- OS：Windows 10/11 x64；
+- Python：3.11.x（用 venv 单独隔离）；
+- GPU：NVIDIA RTX 4060 或同级（推荐 ≥ 8GB 显存）；
+- CUDA：建议使用与 PyTorch cu121 对应的驱动版本（安装官方最新驱动通常即可）。
 
-#### 📊 评估分析模块
-- **测试用例管理**: 支持格式化测试用例输入
-- **多维评估**: 自动运行多维度性能评估
-- **指标可视化**: 图表展示各项评估指标
+`requirements.txt` 已包含：
 
-#### ⚗️ 数据蒸馏模块
-- **文件处理**: 上传JSONL文件进行蒸馏处理
-- **格式转换**: 自动生成监督学习训练对
-- **结果下载**: 支持蒸馏后数据下载
+- LangChain 相关：`langchain*`, `google-search-results`；
+- 向量检索：`faiss-cpu`, `numpy`；
+- 通用工具：`tiktoken`, `python-dotenv`, `requests`, `safetensors`；
+- HF & 微调：`transformers==4.46.0`, `huggingface-hub<1.0`, `peft>=0.10.0`, `datasets`, `accelerate`, `bitsandbytes`, `optimum`；
+- Web：`Flask`, `Flask-SocketIO`, `Flask-CORS`, `python-socketio`, `python-engineio`, `Werkzeug`；
+- 测试：`pytest`。
 
-#### ⚙️ 配置管理
-- **API配置**: 可视化设置OpenAI API Key、Base URL等
-- **参数调优**: 图形化调整优化参数
-- **配置保存**: 自动保存常用配置到浏览器本地
-
-### 🌐 API接口说明
-
-Web界面提供完整的RESTful API，支持程序化调用：
-
-```bash
-# 文本优化
-POST /api/optimize/text
-POST /api/optimize/file
-
-# 数据处理  
-POST /api/synthesize
-POST /api/evaluate
-POST /api/distill
-
-# 任务管理
-GET /api/task/<task_id>
-
-# 结果下载
-GET /api/download/<task_id>/text
-GET /api/download/<task_id>/html  
-GET /api/download/<task_id>/json
-```
-
-### 🎯 使用建议
-
-1. **首次使用**: 在配置页面设置API密钥和相关参数
-2. **短文本**: 直接使用文本输入模式
-3. **长文档**: 使用文件上传模式，合理设置分段参数
-4. **批量处理**: 使用数据合成功能生成大量训练数据
-5. **性能分析**: 使用评估模块测试不同配置的效果
-
-### 📁 目录结构
-```
-web_interface/
-├── app.py              # Flask后端应用
-├── start_web.py        # 启动脚本  
-├── demo.py            # 演示脚本
-├── index.html         # 主页面
-├── requirements_web.txt # Web依赖
-├── static/
-│   ├── css/styles.css # 样式文件
-│   └── js/app.js      # 前端逻辑
-└── README.md          # Web界面详细说明
-```
-
-详细使用说明请参考 `web_interface/README.md`。
+> 注意：PyTorch 未在 `requirements.txt` 中固定版本，请按你本地 GPU / CUDA 环境自行安装。
 
 ---
-## 4. 代码结构说明
-- `multi_agent_nlp_project.py`：
-  - 整个系统的主入口脚本；
-  - 定义 LLM 初始化与回退逻辑、工具集合、向量记忆、双 Agent 协作系统 `DualAgentAcademicSystem`；
-  - 提供命令行接口（demo / synthesize / eval / distill），以及长文本分段优化逻辑；
-  - 提供 JSON / HTML 报告生成与写入辅助函数。
-- `multi_agent_nlp_project.ipynb`：
-  - 与脚本逻辑严格同步的 Notebook 版本；
-  - 以章节划分方式呈现环境检查、LLM 初始化、工具层、向量记忆、双 Agent 协作、示例调用等；
-  - 适合交互试验与可视化展示；如需参考实现细节，可在 Notebook 中逐格查看对应于脚本的实现片段。
-- `lora_distill.py`：
-  - 使用 Hugging Face Transformers + PEFT + Datasets 对蒸馏对进行 LoRA / QLoRA 微调；
-  - 支持普通 LoRA 与 4bit QLoRA（当安装 `bitsandbytes` 且 `--qlora` 打开时）；
-  - 输出微调后的权重与训练配置说明 `RUN_INFO.txt`。
-- `requirements.txt`：
-  - 项目的 Python 依赖清单，覆盖 LangChain、OpenAI 客户端、检索、微调相关库；
-- `.env.example`：
-  - 环境变量示例配置文件，可复制为 `.env` 并填入自己的 API Key 与服务地址。
+## 6. 从零安装与启动
 
----
-## 4. 环境准备与安装
-### 4.1 Python 版本
-建议使用 Python 3.10 及以上版本。
+以 Windows + PowerShell 为例：
 
-### 4.2 创建虚拟环境（Windows CMD）
-```bat
-cd D:\Projects\PythonProject\multi_agent_NLP
+### 6.1 创建虚拟环境
+
+```powershell
+cd D:\Projects\NLP\multi_agent_NLP
 python -m venv .venv
-.venv\Scripts\activate
-python -m pip install --upgrade pip
+.\.venv\Scripts\activate
+```
+
+### 6.2 安装 GPU 版 PyTorch（以 CUDA 12.1 为例）
+
+```powershell
+pip install --index-url https://download.pytorch.org/whl/cu121 torch torchvision torchaudio
+
+python -c "import torch; print('torch:', torch.__version__); print('cuda available:', torch.cuda.is_available()); print('device count:', torch.cuda.device_count())"
+```
+
+确保 `cuda available: True` 且 `device count >= 1`。
+
+### 6.3 安装项目依赖
+
+```powershell
+cd D:\Projects\NLP\multi_agent_NLP
 pip install -r requirements.txt
+```
+
+若 `bitsandbytes` 或 `faiss-cpu` 安装有警告，一般可以忽略，项目会自动回退到简化实现。
+
+### 6.4 准备 `.env` 文件
+
+若仓库中有 `.env.example`，可复制为：
+
+```powershell
 copy .env.example .env
 ```
 
-Linux / macOS 示例：
-```bash
-cd /path/to/multi_agent_NLP
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-cp .env.example .env
-```
+然后根据实际情况编辑 `.env`，示例：
 
----
-## 5. 配置说明（.env / 环境变量）
-在项目根目录创建 `.env` 文件（可从 `.env.example` 复制）：
 ```ini
-OPENAI_API_KEY=你的OpenAI或兼容接口Key（可选）
-SERPAPI_API_KEY=你的SerpAPI Key（可选）
-OPENAI_BASE_URL=https://api.deepseek.com        # 或其他 OpenAI 兼容接口
-LLM_MODEL=deepseek-reasoner                     # 如 gpt-4o-mini / deepseek-chat 等
-EMBED_MODEL_NAME=text-embedding-3-small         # 当 Base URL 支持 embeddings 时生效
-ENABLE_INTERACTIVE=0                            # 1 开启交互模式，0 关闭
-```
-说明：
-- 未配置 `OPENAI_API_KEY` 时，系统自动使用 `DummyLLM`，输出为占位文本，仅用于调试流程；
-- 当 `OPENAI_BASE_URL` 包含 `deepseek.com` 且 `LLM_MODEL` 非官方推荐名字时，脚本会自动规范为 `deepseek-chat` 或 `deepseek-reasoner`；
-- 未配置 `SERPAPI_API_KEY` 时，网络搜索工具会以占位实现替代，但接口仍然可调用。
+# 可选：若使用 DeepSeek/OpenAI 兼容 API
+OPENAI_API_KEY=
+OPENAI_BASE_URL=https://api.deepseek.com
+LLM_MODEL=deepseek-reasoner
 
----
-## 6. 快速上手：常用命令示例
-以下示例假定你已在虚拟环境中并配置好 `.env`。
+# 可选：若使用 SerpAPI 检索
+SERPAPI_API_KEY=
+EMBED_MODEL_NAME=text-embedding-3-small
 
-### 6.1 单条中文文本多轮优化（Demo）
-```bat
-python multi_agent_nlp_project.py demo
+ENABLE_INTERACTIVE=0
+
+# 学生模型（本地 Qwen + LoRA），详见第 7 节
+STUDENT_BASE_MODEL=D:/Projects/NLP/models/Qwen1.5-1.8B-Chat
+STUDENT_LORA_DIR=
+STUDENT_MAX_NEW_TOKENS=256
+FORCE_STUDENT_STUB=0
 ```
 
-自定义文本与需求：
-```bat
+### 6.5 运行一个最小 demo
+
+```powershell
+cd D:\Projects\NLP\multi_agent_NLP
+.\.venv\Scripts\activate
+
 python multi_agent_nlp_project.py demo ^
-  --rounds 3 ^
-  --text "这是一段关于多智能体协作进行学术写作优化的初稿。" ^
+  --rounds 2 ^
+  --text "这是一个需要提升学术表达与逻辑清晰度的段落。" ^
   --requirements "学术表达提升;逻辑结构优化" ^
-  --report demo.json ^
   --html-report demo.html
 ```
 
-英文模式示例：
-```bat
-python multi_agent_nlp_project.py demo ^
-  --lang en ^
-  --text "This is a rough draft about multi-agent collaboration for academic writing." ^
-  --requirements "academic polish,logical coherence" ^
-  --report demo_en.json ^
-  --html-report demo_en.html
+完成后在浏览器中打开 `demo.html` 即可查看完整报告。
+
+### 6.6 启动 Web 界面
+
+```powershell
+cd D:\Projects\NLP\multi_agent_NLP
+.\.venv\Scripts\activate
+
+cd web_interface
+python start_web.py
 ```
 
-### 6.2 长文本文件优化
-将待优化的论文草稿保存为 `paper_draft.txt`：
-```bat
+浏览器访问：`http://localhost:5000`。
+
+---
+## 7. 本地 Qwen + LoRA 学生模型
+
+### 7.1 准备基座 Qwen 模型
+
+1. 将 Qwen1.5 / Qwen2 1.8B Chat 模型下载到本地，例如：
+   `D:/Projects/NLP/models/Qwen1.5-1.8B-Chat`；
+2. 确保该路径能被 transformers 的 `from_pretrained` 识别（结构与 HuggingFace 源仓库一致）。
+
+在 `.env` 中配置：
+
+```ini
+STUDENT_BASE_MODEL=D:/Projects/NLP/models/Qwen1.5-1.8B-Chat
+STUDENT_LORA_DIR=                            # 暂时留空或指向 runs 中的 LoRA
+STUDENT_MAX_NEW_TOKENS=256
+FORCE_STUDENT_STUB=0
+```
+
+`hf_student_llm.HFChatLLM` 会按以下顺序工作：
+
+- 若 `FORCE_STUDENT_STUB=1` 或缺少 torch/transformers，则使用 stub 学生模型（不加载权重，仅占位）；
+- 否则从 `STUDENT_BASE_MODEL` 加载基座 Qwen 模型；
+- 若 `STUDENT_LORA_DIR` 存在且已安装 peft，则加载 LoRA 适配器叠加在基座之上。
+
+### 7.2 使用已训练好的 LoRA（如 `runs/qwen1_8b_lora_v1`）
+
+你已经从 `data/distill_pairs.jsonl` 微调出 LoRA：
+
+```powershell
+python lora_distill.py ^
+  --data data/distill_pairs.jsonl ^
+  --model D:/Projects/NLP/models/Qwen1.5-1.8B-Chat ^
+  --output runs/qwen1_8b_lora_v1 ^
+  --batch 2 ^
+  --epochs 1 ^
+  --lr 5e-5 ^
+  --max-length 1024 ^
+  --gradient-accum 8 ^
+  --fp16
+```
+
+训练成功后，在 `.env` 中填入：
+
+```ini
+STUDENT_BASE_MODEL=D:/Projects/NLP/models/Qwen1.5-1.8B-Chat
+STUDENT_LORA_DIR=D:/Projects/NLP/multi_agent_NLP/runs/qwen1_8b_lora_v1
+STUDENT_MAX_NEW_TOKENS=256
+FORCE_STUDENT_STUB=0
+```
+
+此时，多智能体流程中 Agent A 将使用“基座 Qwen + 你的 LoRA” 作为学生模型。
+
+### 7.3 Stub 学生模型（测试 / CI / 无模型时）
+
+若设置：
+
+```ini
+FORCE_STUDENT_STUB=1
+```
+
+则会启用轻量 stub：
+
+- 不加载任何本地权重；
+- `.invoke()` 返回带有 `[STUB_GENERATION]` 前缀的占位文本；
+- 适合在单元测试、无 GPU、无本地模型时验证流程与报告生成逻辑。
+
+---
+## 8. CLI 模式：demo / synthesize / distill / eval
+
+所有 CLI 子命令都通过 `multi_agent_nlp_project.py` 提供。
+
+### 8.1 `demo`：单文本 / 长文本多轮优化
+
+```powershell
 python multi_agent_nlp_project.py demo ^
-  --text-file paper_draft.txt ^
   --rounds 2 ^
-  --requirements "学术表达提升,结构清晰" ^
-  --chunk-size 5000 ^
-  --chunk-overlap 200 ^
-  --out-text-file optimized_paper.txt ^
-  --report long_demo.json ^
-  --html-report long_demo.html
+  --text "这是一个需要提升学术表达与逻辑清晰度的段落。" ^
+  --requirements "学术表达提升;逻辑结构优化" ^
+  --html-report demo.html
 ```
 
-### 6.3 数据合成 → 蒸馏 → LoRA 微调
-1. 合成多轮协作数据：
-```bat
+支持参数（部分）：
+
+- `--text` / `--text-file`：直接传文本或指定包含文本的文件；
+- `--rounds`：多轮协作的轮数；
+- `--chunk-size` / `--chunk-overlap` / `--max-chunks`：长文本切分参数；
+- `--no-tools` / `--no-memory`：禁用外部工具或记忆；
+- `--html-report`：输出 HTML 报告路径。
+
+### 8.2 `synthesize`：从 `seeds.txt` 合成教师样本（synth_*.jsonl）
+
+```powershell
 python multi_agent_nlp_project.py synthesize ^
   --rounds 3 ^
-  --requirements "学术表达提升,结构清晰,可读性增强" ^
-  --out data\synth.jsonl
+  --seeds-file data\seeds.txt ^
+  --out data\synth_academic_YYYYMMDD_HHMMSS.jsonl
 ```
 
-2. 构造蒸馏训练对：
-```bat
+- `data/seeds.txt`：每行一个种子任务，如研究主题、原始段落、写作指令等；
+- 输出的 `synth_*.jsonl`：包含多轮 Agent A/B 对话、评分、teacher signal 等完整日志。
+
+### 8.3 `distill`：从合成日志构建蒸馏训练集（distill_pairs.jsonl）
+
+```powershell
 python multi_agent_nlp_project.py distill ^
-  --distill-src data\synth.jsonl ^
+  --distill-src data\synth_academic_YYYYMMDD_HHMMSS.jsonl ^
   --distill-out data\distill_pairs.jsonl
 ```
 
-3. 使用 `lora_distill.py` 进行 LoRA 微调：
-```bat
-python lora_distill.py ^
-  --data data\distill_pairs.jsonl ^
-  --model qwen/Qwen1.5-0.5B ^
-  --output runs\qwen-mini-lora ^
-  --epochs 1 ^
-  --batch 2 ^
-  --fp16
-```
+- 从复杂的合成日志中提取结构化的样本：`instruction` + `input` + `output` + `scores` 等；
+- 这些样本将作为 `lora_distill.py` 的训练数据。
 
-如需 QLoRA 4bit（需 GPU 与 `bitsandbytes`）：
-```bat
-python lora_distill.py ^
-  --data data\distill_pairs.jsonl ^
-  --model qwen/Qwen1.5-1.8B-Chat ^
-  --output runs\qwen-lora-4bit ^
-  --epochs 1 ^
-  --batch 2 ^
-  --qlora ^
-  --fp16
-```
+### 8.4 `eval`：批量评估与报告
 
-### 6.4 评估模式
-```bat
+```powershell
 python multi_agent_nlp_project.py eval ^
   --rounds 2 ^
-  --requirements "严谨性,逻辑连贯" ^
-  --report eval.json ^
-  --html-report eval.html
+  --report data\eval_report.json ^
+  --html-report eval_report.html
 ```
 
-控制台会输出类似：
-```text
-📈 评估汇总: {"len_gain_avg":0.132,"ttr_gain_avg":0.045,"repetition_delta_avg":0.021,"n":2,...}
+可对多组样本运行多轮协作与指标评估，输出 JSON 和 HTML 报告，便于比较不同模型或配置的效果。
+
+---
+## 9. 多智能体协作机制（Agent A / Agent B）
+
+简要说明：
+
+- Agent A：
+  - 输入：原始文本 + 用户需求 + 上一轮评分/反馈 + 记忆检索片段；
+  - 输出：新的优化版本；
+  - 在 Hybrid 模式下由本地 Qwen + LoRA 驱动。
+- Agent B：
+  - 输入：原始文本 + 当前候选文本 + 用户需求；
+  - 输出：结构化反馈与多维评分；
+  - 通常使用远程高质量模型（如 DeepSeek），若无则退化为 DummyLLM 占位。
+
+每一轮都会记录：
+
+- `optimized_text`、`agent_b_feedback`、`scores`；
+- `diff`（前后版本差异）和 `tool_observations`；
+- `timestamp` 等元信息。HTML 报告会将这些内容以时间轴方式展示。
+
+---
+## 10. 工具调用与回退策略
+
+- 工具集合（在 `multi_agent_nlp_project.py` 中初始化）：
+  - `SerpAPIWrapper`（若 `SERPAPI_API_KEY` 存在）：实时搜索；
+  - `PythonREPL`：执行小段 Python 代码；
+  - 文件读写工具：基于内置 `open` 实现；
+- 回退逻辑：
+  - 未配置 SerpAPI：搜索工具返回占位提示而不中断流程；
+  - 缺少 LangChain 相关依赖：使用 stub 实现（同名类但简化逻辑）；
+  - 文件读写始终使用 Python 标准库实现。
+
+---
+## 11. 向量记忆与检索
+
+- 默认：
+  - Embeddings：`OpenAIEmbeddings` 或 DummyEmbeddings；
+  - 向量库：`FAISS`（如 `faiss-cpu` 可用时）;
+- 回退：
+  - 若 FAISS 或相关依赖不可用，则使用内置 `SimpleVectorStore`，基于中英文分词 + Jaccard 相似度进行排序；
+- `MemoryManager` 提供：
+  - `add_memory(text, metadata)`：写入带时间戳和命名空间的记忆；
+  - `recall(query, k)`：按相似度返回最近的若干记忆文本片段，用于增强下一轮 Prompt。
+
+---
+## 12. 学术质量评估指标体系
+
+见 `metrics.py` 与 `METRICS_REFERENCE_CARD.txt`，包含但不限于：
+
+- 学术规范性、引文/证据完整性、论证强度、逻辑结构、表达清晰度、语言流畅度、结构完整性等；
+- 支持：单文本打分、优化前后对比、加权综合评估、提升率计算。
+
+`demo_metrics.py` 提供示例用法。
+
+---
+## 13. 数据管线：`seeds.txt` → `synth_*.jsonl` → `distill_pairs.jsonl` → LoRA
+
+简要职责：
+
+- `data/seeds.txt`：
+  - 每行一个“种子任务”或原始段落，是合成数据的起点；
+- `data/synth_*.jsonl`：
+  - 执行 `synthesize` 子命令后的输出，每行记录一次完整的多轮合成/推理过程；
+- `data/distill_pairs.jsonl`：
+  - 执行 `distill` 子命令后的输出，每行是一个精简样本（instruction + input + output + scores 等），直接用于 LoRA 微调。
+
+LoRA 训练由 `lora_distill.py` 完成，输出目录例如 `runs/qwen1_8b_lora_v1/`。
+
+---
+## 14. Web 界面
+
+- 启动方式见第 6.6 节；
+- 提供：
+  - 文本输入与需求配置；
+  - 实时查看多轮进度与中间结果；
+  - 下载最终 HTML 报告；
+- 基于 Flask + SocketIO 实现，适合教学演示和交互式使用。
+
+---
+## 15. 团队协作与 `runs/` 使用说明
+
+> 这一节回答常见问题：`runs/` 目录里是什么？团队成员如何复用与继续训练？
+
+- `runs/` 目录保存的是：
+  - 你训练得到的 **LoRA 适配器权重**（如 `adapter_model.safetensors`）；
+  - 训练 checkpoint（`checkpoint-*` 子目录中的优化器状态等）;
+  - tokenizer 拷贝和 `RUN_INFO.txt` 等元数据；
+- `runs/` **不是完整的 Qwen 基座模型**，而是基座之上的“小增量参数”。
+
+在推理时，学生 Agent A 实际使用的是：
+
+> **本地基座 Qwen 模型（大） + `runs/<run_name>/` 中的 LoRA 适配器（小）**
+
+因此：
+
+- 将本项目上传到 GitHub 时：
+  - 通常只提交 `runs/qwen1_8b_lora_v1/` 这类 LoRA 适配器目录；
+  - 不提交体积巨大的基座 Qwen 权重（且原始模型 License 往往不鼓励这样做）。
+- 团队其他成员使用你的学生模型时：
+  1. 自己在本地或共享存储中准备与您相同版本的 Qwen 基座模型；
+  2. 克隆你的仓库，包含 `runs/` 目录；
+  3. 在各自的 `.env` 中设置：
+
+     ```ini
+     STUDENT_BASE_MODEL=<他们本地的 Qwen 基座路径>
+     STUDENT_LORA_DIR=<仓库根路径>/runs/qwen1_8b_lora_v1
+     ```
+
+  4. 即可获得与你相同的学生模型行为，**无需重新训练 LoRA**。
+
+若需要“在你的基础上继续训练”：
+
+- 简单做法：
+  - 使用相同基座 + 你的 `distill_pairs.jsonl` 或新蒸馏数据，再调用 `lora_distill.py` 训练到新的输出目录（如 `runs/qwen1_8b_lora_v2/`）。
+- 进阶做法：
+  - 可在 `lora_distill.py` 中扩展 `--resume-from-lora` 等参数，从已有 LoRA 适配器继续训练（对本项目当前功能不是必需，可后续扩展）。
+
+---
+## 16. 测试与质量保障（可选）
+
+项目包含一部分单元测试，主要覆盖：
+
+- 需求字符串解析；
+- 长文本切分与重叠逻辑；
+- 无 OpenAI API Key 时的 DummyLLM 回退流程；
+- HTML 报告结构完整性；
+- 从合成日志构建蒸馏样本的逻辑；
+- 学生 stub / 基座模型混合模式构建。
+
+如需在本地运行：
+
+```powershell
+cd D:\Projects\NLP\multi_agent_NLP
+.\.venv\Scripts\activate
+pytest
 ```
 
-### 6.5 禁用部分组件做消融实验
-```bat
-python multi_agent_nlp_project.py demo ^
-  --rounds 2 ^
-  --no-tools ^
-  --no-memory
-```
-这会关闭工具调用和向量记忆，便于对比多智能体策略本身的贡献。
+在 CI 或无 GPU 环境下，建议设置：
 
----
-## 7. CLI 参数与工作流详情
-脚本入口：`multi_agent_nlp_project.py`，总体调用方式：
-```text
-python multi_agent_nlp_project.py [command] [--options]
+```powershell
+$env:FORCE_STUDENT_STUB='1'
 ```
 
-### 7.1 command 子命令
-- `demo`：单条文本多轮优化（支持长文本分段、报告输出）；
-- `synthesize`：基于种子文本批量合成多轮协作数据，写入 JSONL；
-- `eval`：对多条测试文本运行协作流程，统计多维指标；
-- `distill`：从合成的 JSONL 数据中生成蒸馏训练对 JSONL。
-
-### 7.2 通用参数
-- `--rounds <int>`：协作轮次（>=1）；
-- `--requirements <str>`：用逗号/分号/中文分号分隔的需求列表；
-- `--lang zh|en`：语言（会影响默认初稿与默认需求）；
-- `--no-tools`：禁用工具调用层；
-- `--no-memory`：禁用向量记忆层；
-- `--report <path>`：输出 JSON 报告（demo / eval / synthesize / distill 不同模式下结构略有不同）；
-- `--html-report <path>`：输出 HTML 可视化报告（demo / eval / 长文本 demo 支持）。
-
-### 7.3 demo 模式特有参数
-- `--text <str>`：直接在命令行提供初始文本；
-- `--text-file <path>`：从文本文件读取长初稿并自动分段；
-- `--chunk-size <int>`：单段最大字符数（默认 5000，<=0 表示不分段）；
-- `--chunk-overlap <int>`：相邻分段的重叠字符数（默认 200，用于保持上下文连贯性）；
-- `--max-chunks <int>`：限制最多处理的段数（0 表示不限制，仅用于快速实验）；
-- `--out-text-file <path>`：将最终优化后的整篇文本写入该路径。
-
-### 7.4 synthesize / distill 特有参数
-- `--seeds-file <path>`（synthesize）：从文件读取种子文本（每行一条）。未提供时使用内置 3 条示例；
-- `--out <path>`（synthesize）：指定合成 JSONL 输出路径；
-- `--distill-src <path>`（distill）：上游合成 JSONL 源；
-- `--distill-out <path>`（distill）：蒸馏对 JSONL 输出路径。
-
----
-## 8. Notebook 与脚本的一致性说明
-- `multi_agent_nlp_project.ipynb` 与 `multi_agent_nlp_project.py` 在核心逻辑上保持同步：
-  - LLM 初始化与三层回退策略；
-  - 工具层构造（SerpAPI / Python REPL / 文件读写）；
-  - 向量记忆（FAISS 或 SimpleVectorStore 回退）；
-  - 双 Agent 协作系统 `DualAgentAcademicSystem`（prompt 设计、评分解析、Diff 计算）；
-- Notebook 以“章节 + 代码单元”的形式展开上述实现，方便逐步执行和可视化调试；
-- 当你在脚本中修改核心逻辑时，建议同步更新 Notebook 中对应单元，以保持示例与实际行为一致（当前仓库已完成一次同步校验）。
-
-在 Notebook 中进行一次端到端示例：
-1. 运行环境检查与 LLM 初始化单元；
-2. 运行工具层与向量记忆单元；
-3. 实例化 `DualAgentAcademicSystem`：
-   ```python
-   system = DualAgentAcademicSystem(llm, TOOLS, vectorstore)
-   ```
-4. 调用多轮协作：
-   ```python
-   final_text, log = system.collaborate(
-       "这是一段关于多智能体协作进行学术写作优化的初稿。",
-       ["学术表达提升", "逻辑结构优化"],
-       rounds=2,
-   )
-   ```
-5. 根据 `log` 中的 `scores`、`diff`、`tool_observations` 进一步分析每一轮表现。
-
----
-## 9. 典型使用场景与优化思路
-- **学术论文段落打磨**：将 Methods/Results/Discussion 段落依次送入系统，根据“严谨性”“逻辑连贯”“可读性”等需求进行多轮优化；
-- **数据生成与蒸馏**：使用较强的商业模型（如 GPT-4 级别）进行多轮协作，生成高质量 teacher signal，再对开源模型、企业私有模型做蒸馏微调；
-- **多智能体策略实验**：基于本框架尝试不同的 Agent 角色、评分维度、工具触发逻辑，观察其对最终文本质量与指标的影响；
-- **长篇报告 / 毕业论文草稿润色**：利用 `--text-file` + 分段重叠设计，处理较长的中文/英文学术文档，并输出整体优化结果与分段日志。
-
----
-## 10. 数据格式规范
-### 10.1 合成数据（synthesize 输出 JSONL）
-每行一个 JSON 对象，示例结构：
-```json
-{
-  "id": "case_0",
-  "input": "原始种子文本",
-  "requirements": ["学术表达提升", "结构清晰"],
-  "final": "最终优化文本",
-  "log": [
-    {"round": 0, "user_input": "...", "requirements": ["..."], "timestamp": "..."},
-    {"round": 1, "optimized_text": "...", "agent_b_feedback": "...", "scores": {"quality": 8.0, "rigor": 7.0}, "diff": "...", ...},
-    {"round": 2, ...}
-  ],
-  "created_at": "ISO 时间",
-  "teacher_signal": "最后一轮 optimized_text（用于蒸馏）",
-  "scores": {"quality": 8.0, "rigor": 7.0, "logic": 7.0, "novelty": 6.0}
-}
-```
-
-### 10.2 蒸馏对（distill 输出 JSONL）
-```json
-{"instruction": "优化以下学术段落，满足需求: 学术表达提升, 结构清晰\n原文: ...", "output": "teacher 信号文本", "scores": {"quality":8.0,"rigor":7.0}}
-```
-
-### 10.3 LoRA 训练拼接格式
-`lora_distill.py` 会将每条 `instruction/output` 拼接为：
-```text
-指令:
-<instruction>
-
-优质答案:
-<output>
-```
-用于常规自回归语言模型微调。
-
-### 10.4 报告 JSON / HTML
-- JSON 报告（`--report`）：
-  - demo 模式：`{"final": 最终文本, "log": 协作日志}`；
-  - 长文本模式：`{"final": 最终整篇文本, "aggregated": {"segments": [...], ...}}`；
-  - eval 模式：`{"summary": 指标均值, "cases": 单条样本指标}`；
-  - synthesize / distill 模式：包含生成文件路径等元信息。
-- HTML 报告（`--html-report`）：
-  - 按轮展示优化文本、Agent B 反馈、评分、Diff（新内容高亮为绿色，删除为红色）、工具调用观测；
-  - eval 模式下展示指标汇总表格与各案例的概览。
-
----
-## 11. 评估指标含义
-| 指标 | 说明 |
-|------|------|
-| `len_gain` | 长度变化比例 `(final_len - orig_len) / orig_len` |
-| `ttr_gain` | 词汇多样性 Type Token Ratio 提升 |
-| `repetition_delta` | 最高频 token 占比下降（越大越少重复） |
-| `readability_gain` | 基于平均句长的可读性代理值变化 |
-| `coherence_gain` | 邻接句子词汇交集/并集比平均提升，作为连贯性代理 |
-| `sent_var_delta` | 原句长方差 - 新句长方差（正值表示更均匀） |
-| `bigram_rep_delta` | 高频二元组占比下降（重复模式减少） |
-| `quality/rigor/logic/novelty` | Agent B 在 JSON 中给出的主观评分均值 |
-
-这些指标由 `DualAgentAcademicSystem.evaluate()` 计算并在 eval 模式中聚合输出。
-
----
-## 12. 性能与调优建议
-| 目标 | 建议 |
-|------|------|
-| 提升速度 | 降低 `--rounds`、缩短初稿、在不关键场景下关闭工具与记忆（`--no-tools --no-memory`） |
-| 降低显存占用 | 使用 QLoRA 4bit（`--qlora`），减小 `--max-length`，调低 batch 或使用梯度累积 |
-| 强化多样性 | 在合成阶段丰富需求组合与种子语料、多语言混合、增加轮数 |
-| 提升 teacher 质量 | 使用更强的上游大模型生成合成数据，再对开源模型、企业私有模型做蒸馏 |
-| 减少指令截断 | 在 `lora_distill.py` 中适当提高 `--max-length`（需平衡显存） |
-| 训练更平稳 | 增大 `--epochs`、设置合理的 `--warmup-ratio`、按数据规模调整 `--gradient-accum` |
-
----
-## 13. 常见问题 FAQ
-1. **导入 faiss 失败？**  
-   - 已自动回退到 `SimpleVectorStore`，功能仍可使用；如需更高召回质量与性能，可安装 `faiss-cpu`。
-
-2. **搜索结果总是占位？**  
-   - 很可能没有设置 `SERPAPI_API_KEY`，可在 `.env` 中补充或忽略搜索相关功能。
-
-3. **输出看起来总是“空话”？**  
-   - 检查是否未设置 `OPENAI_API_KEY`，此时使用的是 `DummyLLM` 占位输出，仅用于调试；配置真实 Key 后重新运行。
-
-4. **Embeddings 初始化失败或 404？**  
-   - 部分兼容接口（如 DeepSeek）暂不支持 embeddings，本项目会自动切换到 `DummyEmbeddings` 与简易向量检索，不影响主流程。
-
-5. **bitsandbytes 安装失败？**  
-   - 不使用 `--qlora` 即可，只跑普通 LoRA；或在支持的 GPU/驱动环境中安装 `bitsandbytes`。
-
-6. **HTML 报告没有生成？**  
-   - 仅 demo / eval / 长文本模式会生成 HTML 报告，`synthesize` 与 `distill` 仅输出 JSON 或 JSONL 文件。
-
-7. **Agent B 的评分 JSON 解析失败？**  
-   - 可能是模型未严格遵循 JSON 格式提示；可以提高模型质量、增加约束提示，或在后处理时增加更鲁棒的解析方式。
-
-8. **Diff 太长或不易阅读？**  
-   - 内部对 Diff 有 400 行的截断逻辑，可根据需要在 `DualAgentAcademicSystem._compute_diff` 中调整。
-
----
-## 14. 后续扩展建议
-- 在 `_plan_and_act()` 中新增领域检索工具（如论文数据库 API），增强事实依据；
-- 扩展 Agent B 的评分维度与诊断模板，例如增加“清晰度”“严谨引用”“实验完整性”等；
-- 引入并行分段处理与跨段全局精修，进一步提升长文档整体一致性；
-- 将目前的指标与日志输出接入可视化面板（如 Streamlit / Gradio）构建交互 Demo UI。
-
-本 README 与 `multi_agent_nlp_project.py` / `multi_agent_nlp_project.ipynb` 已按当前代码同步整理，可作为理解和使用整个“学术表达优化助手”项目的主参考文档。
+以避免加载真实大模型，使用 stub 学生模型测试整体流程与接口。
